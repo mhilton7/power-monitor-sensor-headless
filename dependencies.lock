@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "project": "power-monitor-sensor-headless",
+  "esp_idf": {
+    "version": "6.0.2",
+    "git_commit": "7101770dc6db2667b3c477cc31365dd1acd6db4e",
+    "repository": "https://github.com/espressif/esp-idf.git"
+  },
+  "protocol": "pm-protocol/1.0.0",
+  "external_components": [],
+  "runtime": "native ESP-IDF APIs only",
+  "host_test_runtime": "Python 3.11 standard library and CMake/CTest"
+}
+

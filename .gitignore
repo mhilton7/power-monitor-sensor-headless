@@ -1,0 +1,39 @@
+# ESP-IDF and host build outputs
+build*/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock.generated
+
+# Generated test/release evidence
+test-results/
+release/out/
+coverage/
+*.gcda
+*.gcno
+*.profraw
+
+# Secrets and device/user artifacts
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.nvs
+*.dump
+*.bin
+*.elf
+*.map
+*.uf2
+hardware-evidence/private/
+provisioning-input*.json
+diagnostics-*.zip
+
+# Editor/OS state
+.vs/
+.vscode/settings.json
+.idea/
+Thumbs.db
+.DS_Store
+

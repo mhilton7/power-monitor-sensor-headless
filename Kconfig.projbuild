@@ -1,0 +1,67 @@
+menu "PowerMeter V2 headless sensor"
+
+choice PM_METER_VARIANT
+    prompt "PZEM protocol variant"
+    default PM_METER_VARIANT_UNSPECIFIED
+    help
+        Select only after matching physical markings and protocol evidence.
+        Production builds reject an unspecified variant.
+
+    config PM_METER_VARIANT_UNSPECIFIED
+        bool "Unspecified (safe; physical meter disabled)"
+
+    config PM_METER_VARIANT_PZEM004T_V4_CLASSIC
+        bool "PZEM-004T V4-classic candidate (0x04/10 input registers)"
+endchoice
+
+config PM_HARDWARE_IDENTITY_VERIFIED
+    bool "Marked PZEM unit identity has passed the physical verification gate"
+    default n
+    depends on PM_METER_VARIANT_PZEM004T_V4_CLASSIC
+    help
+        Enable only for a build tied to machine-readable evidence from the
+        exact marked PZEM and ESP32-S3 unit. A generic seller listing is not
+        sufficient evidence.
+
+config PM_PRODUCTION_RELEASE
+    bool "Stable production release build"
+    default n
+    help
+        Requires both a selected meter variant and verified hardware evidence.
+
+config PM_RELEASE_CANDIDATE
+    bool "Hardware-pending release-candidate build"
+    default n
+    help
+        Builds all production paths but keeps physical meter acquisition
+        fail-closed until local identity verification is committed.
+
+config PM_SIMULATED_METER
+    bool "Use deterministic simulated meter"
+    default n
+    help
+        Test-only profile. Simulated readings are explicitly marked and are
+        rejected by production server ingestion.
+
+config PM_HEARTBEAT_SECONDS
+    int "Heartbeat period in seconds"
+    range 5 300
+    default 15
+
+config PM_METER_SAMPLE_MS
+    int "PZEM sampling interval in milliseconds"
+    range 250 60000
+    default 1000
+
+config PM_DURABLE_INTERVAL_SECONDS
+    int "Durable interval duration in seconds"
+    range 10 3600
+    default 60
+
+config PM_SD_SPI_KHZ
+    int "Initial microSD SPI frequency in kHz"
+    range 400 20000
+    default 4000
+
+endmenu
+
