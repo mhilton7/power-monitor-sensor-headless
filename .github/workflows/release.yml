@@ -311,9 +311,11 @@ jobs:
           test "$(git -C "$IDF_PATH" describe --tags --exact-match)" = v6.0.2
           test "$(git -C "$IDF_PATH" rev-parse HEAD)" = 7101770dc6db2667b3c477cc31365dd1acd6db4e
       - name: Install pinned release validators
-        run: python -m pip install --disable-pip-version-check --require-hashes -r test/host/requirements.txt
+        run: >-
+          /opt/esp/entrypoint.sh python -m pip install --disable-pip-version-check
+          --require-hashes -r test/host/requirements.txt
       - name: Re-run host evidence for the release artifact
-        run: python tools/run_host_tests.py
+        run: /opt/esp/entrypoint.sh python tools/run_host_tests.py
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: hardware-certification-input
@@ -327,14 +329,14 @@ jobs:
           set-target esp32s3 build
       - name: Audit the compiled external dependency set
         run: >-
-          python tools/audit_dependencies.py
+          /opt/esp/entrypoint.sh python tools/audit_dependencies.py
           --output test-results/security/dependency-audit.json
       - name: Bind the tag version to the compiled firmware descriptor
         env:
           RELEASE_VERSION: ${{ needs.tag_authenticity.outputs.version }}
         shell: bash
         run: |
-          python - <<'PY'
+          /opt/esp/entrypoint.sh python - <<'PY'
           import json
           import os
           import struct
@@ -369,7 +371,7 @@ jobs:
         shell: bash
         run: |
           image_sha256="$(sha256sum build-release/power-monitor-sensor-headless.bin | cut -d ' ' -f 1)"
-          python test/hardware/verify_evidence.py \
+          /opt/esp/entrypoint.sh python test/hardware/verify_evidence.py \
             test-results/release-input/hardware-certification.json \
             --firmware-commit "${{ needs.tag_authenticity.outputs.source_commit }}" \
             --firmware-sha256 "$image_sha256"
@@ -381,7 +383,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "release/out/$VERSION"
-          python tools/build_release.py \
+          /opt/esp/entrypoint.sh python tools/build_release.py \
             --build-dir build-release \
             --output-dir "release/out/$VERSION" \
             --version "$VERSION" \
@@ -397,7 +399,7 @@ jobs:
           SOURCE_COMMIT: ${{ needs.tag_authenticity.outputs.source_commit }}
         shell: bash
         run: |
-          python - <<'PY'
+          /opt/esp/entrypoint.sh python - <<'PY'
           import hashlib
           import json
           import os
