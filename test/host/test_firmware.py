@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import struct
 import unittest
 from pathlib import Path
@@ -259,6 +260,12 @@ class SecurityTests(unittest.TestCase):
 
 class ReleaseWorkflowTests(unittest.TestCase):
     @staticmethod
+    def _ci_workflow() -> str:
+        return (
+            Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+
+    @staticmethod
     def _release_workflow() -> str:
         return (
             Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
@@ -291,6 +298,40 @@ class ReleaseWorkflowTests(unittest.TestCase):
             if line.strip().startswith(("run: python", "python "))
         ]
         self.assertEqual(raw_python_commands, [])
+
+    def test_ci_validates_release_requirements_in_the_pinned_idf_container(self):
+        workflow = self._ci_workflow()
+        esp_idf_build = workflow.split("\n  esp-idf-build:\n", 1)[1].split(
+            "\n  powershell-contract:\n", 1
+        )[0]
+        image = (
+            "container: espressif/idf:v6.0.2@sha256:"
+            "0d8c9773d48a327233f9c1d7c654ff0bcf133ae24503ea2e97a57cfe02b8cb67"
+        )
+        install = "/opt/esp/entrypoint.sh python -m pip install"
+        self.assertIn(image, esp_idf_build)
+        self.assertEqual(esp_idf_build.count(install), 1)
+        self.assertIn("--require-hashes -r test/host/requirements.txt", esp_idf_build)
+        self.assertLess(
+            esp_idf_build.index(install),
+            esp_idf_build.index("Release-candidate build"),
+        )
+
+    def test_rpds_python_311_and_312_wheel_hashes_are_exact(self):
+        requirements = (
+            Path(__file__).resolve().parent / "requirements.txt"
+        ).read_text(encoding="utf-8")
+        rpds_030 = requirements.split(
+            'rpds-py==0.30.0; python_version < "3.13"', 1
+        )[1].split("rpds-py==2026.6.3", 1)[0]
+        self.assertEqual(
+            set(re.findall(r"--hash=sha256:([0-9a-f]{64})", rpds_030)),
+            {
+                "33f559f3104504506a44bb666b93a33f5d33133765b0c216a5bf2f1e1503af89",
+                "47f236970bccb2233267d89173d3ad2703cd36a0e2a6e92d0560d333871a3d23",
+                "a51033ff701fca756439d641c0ad09a41d9242fa69121c7d8769604a0a629825",
+            },
+        )
 
 
 if __name__ == "__main__":

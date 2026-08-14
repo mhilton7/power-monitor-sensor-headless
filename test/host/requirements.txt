@@ -8,6 +8,7 @@ referencing==0.36.2 \
     --hash=sha256:e8699adbbf8b5c7de96d8ffa0eb5c158b3beafce084968e2ea8bb08c6794dcd0
 rpds-py==0.30.0; python_version < "3.13" \
     --hash=sha256:33f559f3104504506a44bb666b93a33f5d33133765b0c216a5bf2f1e1503af89 \
+    --hash=sha256:47f236970bccb2233267d89173d3ad2703cd36a0e2a6e92d0560d333871a3d23 \
     --hash=sha256:a51033ff701fca756439d641c0ad09a41d9242fa69121c7d8769604a0a629825
 rpds-py==2026.6.3; python_version >= "3.13" \
     --hash=sha256:9250a9a0a6fd4648b3f868da8d91a4c52b5811a62df58e753d50ae4454a36f80
