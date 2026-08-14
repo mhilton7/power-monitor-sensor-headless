@@ -1,14 +1,21 @@
-{
-  "schema": 1,
-  "project": "power-monitor-sensor-headless",
-  "esp_idf": {
-    "version": "6.0.2",
-    "git_commit": "7101770dc6db2667b3c477cc31365dd1acd6db4e",
-    "repository": "https://github.com/espressif/esp-idf.git"
-  },
-  "protocol": "pm-protocol/1.0.0",
-  "external_components": [],
-  "runtime": "native ESP-IDF APIs only",
-  "host_test_runtime": "Python 3.11 standard library and CMake/CTest"
-}
-
+dependencies:
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.19~2
+  idf:
+    source:
+      type: idf
+    version: 6.0.2
+direct_dependencies:
+- espressif/cjson
+- idf
+manifest_hash: d0e54c7b4188420bdb10eb6fd4e7caa0bc940a6b1beb36eb8de3e642701728a0
+target: esp32s3
+version: 3.0.0

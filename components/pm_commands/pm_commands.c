@@ -1,0 +1,201 @@
+#include "pm_commands.h"
+
+#include <stddef.h>
+#include <string.h>
+
+#include "esp_random.h"
+#include "nvs.h"
+#include "pm_config.h"
+#include "pm_protocol.h"
+
+static const char *const type_names[PM_COMMAND_TYPE_COUNT] = {
+    "reboot", "maintenance_sleep", "sync_now", "diagnostics_snapshot", "network_self_test",
+    "meter_self_test", "storage_self_test", "format_storage_prepare", "format_storage_commit",
+    "apply_configuration", "rotate_device_credentials", "ota_install", "data_reset_prepare",
+    "data_reset_commit", "data_reset_cancel",
+};
+
+static const char *const state_names[] = {
+    "queued", "delivered", "accepted", "running", "succeeded", "failed", "expired", "cancelled",
+    "superseded", "awaiting_reboot", "awaiting_heartbeat", "rolled_back",
+};
+
+static uint32_t command_crc(const pm_command_t *command)
+{
+    return pm_crc32_ieee(command, offsetof(pm_command_t, crc32));
+}
+
+static uint32_t ledger_crc(const pm_command_ledger_t *ledger)
+{
+    return pm_crc32_ieee(ledger, offsetof(pm_command_ledger_t, crc32));
+}
+
+static bool command_valid(const pm_command_t *command)
+{
+    return command->command_id[0] != '\0' && command->type < PM_COMMAND_TYPE_COUNT &&
+           command->state <= PM_COMMAND_ROLLED_BACK && command->progress_percent <= 100U &&
+           command->crc32 == command_crc(command);
+}
+
+static bool ledger_valid(const pm_command_ledger_t *ledger)
+{
+    if (ledger->next >= PM_COMMAND_LEDGER_SIZE || ledger->crc32 != ledger_crc(ledger)) {
+        return false;
+    }
+    for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
+        if (ledger->entries[i].command_id[0] != '\0' && !command_valid(&ledger->entries[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static esp_err_t persist(pm_command_ledger_t *ledger)
+{
+    ledger->generation++;
+    for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
+        if (ledger->entries[i].command_id[0] != '\0') {
+            ledger->entries[i].crc32 = command_crc(&ledger->entries[i]);
+        }
+    }
+    ledger->crc32 = ledger_crc(ledger);
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open("pm_commands", NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_blob(handle, (ledger->generation & 1U) != 0U ? "slot_a" : "slot_b", ledger, sizeof(*ledger));
+    }
+    if (error == ESP_OK) {
+        error = nvs_commit(handle);
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+    return error;
+}
+
+static bool load_slot(nvs_handle_t handle, const char *key, pm_command_ledger_t *ledger)
+{
+    size_t size = sizeof(*ledger);
+    return nvs_get_blob(handle, key, ledger, &size) == ESP_OK && size == sizeof(*ledger) && ledger_valid(ledger);
+}
+
+esp_err_t pm_commands_load(pm_command_ledger_t *ledger)
+{
+    if (ledger == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open("pm_commands", NVS_READWRITE, &handle);
+    if (error != ESP_OK) {
+        return error;
+    }
+    pm_command_ledger_t a = {0};
+    pm_command_ledger_t b = {0};
+    const bool valid_a = load_slot(handle, "slot_a", &a);
+    const bool valid_b = load_slot(handle, "slot_b", &b);
+    nvs_close(handle);
+    if (!valid_a && !valid_b) {
+        memset(ledger, 0, sizeof(*ledger));
+        return persist(ledger);
+    }
+    *ledger = valid_a && (!valid_b || a.generation >= b.generation) ? a : b;
+    return ESP_OK;
+}
+
+esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *incoming, int64_t now_utc_ms,
+                            pm_command_t **stored, bool *duplicate)
+{
+    if (ledger == NULL || incoming == NULL || stored == NULL || duplicate == NULL ||
+        incoming->command_id[0] == '\0' || incoming->idempotency_key[0] == '\0' ||
+        incoming->type >= PM_COMMAND_TYPE_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
+        if (strcmp(ledger->entries[i].command_id, incoming->command_id) == 0 ||
+            strcmp(ledger->entries[i].idempotency_key, incoming->idempotency_key) == 0) {
+            if (ledger->entries[i].type != incoming->type || strcmp(ledger->entries[i].payload, incoming->payload) != 0) {
+                return ESP_ERR_INVALID_CRC;
+            }
+            *stored = &ledger->entries[i];
+            *duplicate = true;
+            return ESP_OK;
+        }
+    }
+    pm_command_t candidate = *incoming;
+    candidate.state = now_utc_ms > candidate.expires_utc_ms ? PM_COMMAND_EXPIRED : PM_COMMAND_ACCEPTED;
+    candidate.progress_percent = 0U;
+    candidate.crc32 = command_crc(&candidate);
+    ledger->entries[ledger->next] = candidate;
+    pm_command_t *entry = &ledger->entries[ledger->next];
+    ledger->next = (uint8_t)((ledger->next + 1U) % PM_COMMAND_LEDGER_SIZE);
+    const esp_err_t error = persist(ledger);
+    if (error != ESP_OK) {
+        return error;
+    }
+    *stored = entry;
+    *duplicate = false;
+    return candidate.state == PM_COMMAND_EXPIRED ? ESP_ERR_TIMEOUT : ESP_OK;
+}
+
+esp_err_t pm_command_transition(pm_command_ledger_t *ledger, pm_command_t *command, pm_command_state_t state,
+                                uint8_t progress_percent, int32_t result_code)
+{
+    if (ledger == NULL || command == NULL || state > PM_COMMAND_ROLLED_BACK || progress_percent > 100U ||
+        progress_percent < command->progress_percent) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const bool terminal = command->state == PM_COMMAND_SUCCEEDED || command->state == PM_COMMAND_FAILED ||
+                          command->state == PM_COMMAND_EXPIRED || command->state == PM_COMMAND_CANCELLED ||
+                          command->state == PM_COMMAND_ROLLED_BACK;
+    if (terminal && state != command->state) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    command->state = state;
+    command->progress_percent = progress_percent;
+    command->result_code = result_code;
+    return persist(ledger);
+}
+
+esp_err_t pm_command_prepare(pm_command_ledger_t *ledger, pm_command_t *command, int64_t expires_monotonic_us,
+                             uint8_t token[PM_CONFIRMATION_TOKEN_SIZE])
+{
+    if (ledger == NULL || command == NULL || token == NULL || expires_monotonic_us <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_fill_random(command->confirmation_token, sizeof(command->confirmation_token));
+    memcpy(token, command->confirmation_token, sizeof(command->confirmation_token));
+    command->confirmation_expires_monotonic_us = expires_monotonic_us;
+    return persist(ledger);
+}
+
+bool pm_command_confirmation_valid(const pm_command_t *prepared, const uint8_t token[PM_CONFIRMATION_TOKEN_SIZE],
+                                   int64_t now_monotonic_us)
+{
+    return prepared != NULL && token != NULL && now_monotonic_us <= prepared->confirmation_expires_monotonic_us &&
+           pm_constant_time_equal(prepared->confirmation_token, token, PM_CONFIRMATION_TOKEN_SIZE);
+}
+
+const char *pm_command_type_name(pm_command_type_t type)
+{
+    return type < PM_COMMAND_TYPE_COUNT ? type_names[type] : "invalid";
+}
+
+const char *pm_command_state_name(pm_command_state_t state)
+{
+    return state <= PM_COMMAND_ROLLED_BACK ? state_names[state] : "invalid";
+}
+
+bool pm_command_type_from_name(const char *name, pm_command_type_t *type)
+{
+    if (name == NULL || type == NULL) {
+        return false;
+    }
+    for (size_t i = 0U; i < PM_COMMAND_TYPE_COUNT; ++i) {
+        if (strcmp(name, type_names[i]) == 0) {
+            *type = (pm_command_type_t)i;
+            return true;
+        }
+    }
+    return false;
+}
+
