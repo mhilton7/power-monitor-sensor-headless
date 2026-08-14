@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "CommandEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "command_type": {
+          "title": "Command Type",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "not_before": {
+          "format": "date-time",
+          "title": "Not Before",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Payload",
+          "type": "object"
+        },
+        "required_firmware_capability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Required Firmware Capability"
+        }
+      },
+      "required": [
+        "command_id",
+        "command_type",
+        "not_before",
+        "expires_at",
+        "attempt",
+        "idempotency_key",
+        "required_firmware_capability",
+        "payload"
+      ],
+      "title": "CommandEnvelope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "commands": {
+      "items": {
+        "$ref": "#/$defs/CommandEnvelope"
+      },
+      "title": "Commands",
+      "type": "array"
+    },
+    "gaps": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "integer"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Gaps",
+      "type": "array"
+    },
+    "highest_contiguous_sequence": {
+      "minimum": 0,
+      "title": "Highest Contiguous Sequence",
+      "type": "integer"
+    },
+    "protocol_id": {
+      "const": "pm-protocol/1.0.0",
+      "default": "pm-protocol/1.0.0",
+      "title": "Protocol Id",
+      "type": "string"
+    },
+    "server_time": {
+      "format": "date-time",
+      "title": "Server Time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "server_time",
+    "highest_contiguous_sequence",
+    "gaps",
+    "commands"
+  ],
+  "title": "DeviceResponse",
+  "type": "object"
+}

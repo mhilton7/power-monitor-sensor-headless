@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://power-meter.invalid/schemas/pm-firmware-release-1.0.0.json",
+  "title": "PowerMeter V2 firmware release artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "build_number", "project_name", "target_chip", "board_profile",
+    "minimum_boot_version", "minimum_config_version", "minimum_protocol", "image_size",
+    "image_sha256", "download_url", "ota_authentication", "hardware_certification", "git_commit"
+  ],
+  "properties": {
+    "schema": {"const": "pm-firmware-release/1.0.0"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+    "build_number": {"type": "integer", "minimum": 1},
+    "project_name": {"const": "power-monitor-sensor-headless"},
+    "target_chip": {"const": "esp32s3"},
+    "board_profile": {"const": "esp32-s3-devkitc-n16r8-reference/1"},
+    "minimum_boot_version": {"type": "integer", "minimum": 1},
+    "minimum_config_version": {"type": "integer", "minimum": 1},
+    "minimum_protocol": {"const": "pm-protocol/1.0.0"},
+    "image_size": {"type": "integer", "minimum": 1, "maximum": 7864320},
+    "image_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "download_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "ota_authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "canonical_prefix", "required_runtime_fields", "note"],
+      "properties": {
+        "mode": {"const": "per-device-hmac-sha256"},
+        "canonical_prefix": {"const": "PM-OTA-MANIFEST-V1"},
+        "required_runtime_fields": {
+          "type": "array", "const": ["manifest_nonce", "signature"]
+        },
+        "note": {"type": "string", "minLength": 1}
+      }
+    },
+    "hardware_certification": {"enum": ["pending", "certified"]},
+    "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+  }
+}

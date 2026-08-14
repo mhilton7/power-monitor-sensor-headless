@@ -1,0 +1,234 @@
+{
+  "$defs": {
+    "DurableReading": {
+      "additionalProperties": false,
+      "properties": {
+        "active_power_mw": {
+          "anyOf": [
+            {
+              "maximum": 300000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Power Mw"
+        },
+        "current_ma": {
+          "anyOf": [
+            {
+              "maximum": 1000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Ma"
+        },
+        "energy_selection": {
+          "enum": [
+            "pzem_delta",
+            "diagnostic_power_integration",
+            "unavailable_reset",
+            "unavailable_invalid"
+          ],
+          "title": "Energy Selection",
+          "type": "string"
+        },
+        "expected_sample_count": {
+          "exclusiveMinimum": 0,
+          "maximum": 3600,
+          "title": "Expected Sample Count",
+          "type": "integer"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Flags",
+          "type": "array"
+        },
+        "frequency_mhz": {
+          "anyOf": [
+            {
+              "maximum": 70000,
+              "minimum": 40000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frequency Mhz"
+        },
+        "interval_end_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Interval End Utc"
+        },
+        "interval_energy_mwh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interval Energy Mwh"
+        },
+        "interval_start_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Interval Start Utc"
+        },
+        "monotonic_end_us": {
+          "exclusiveMinimum": 0,
+          "title": "Monotonic End Us",
+          "type": "integer"
+        },
+        "monotonic_start_us": {
+          "minimum": 0,
+          "title": "Monotonic Start Us",
+          "type": "integer"
+        },
+        "power_factor_milli": {
+          "anyOf": [
+            {
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power Factor Milli"
+        },
+        "pzem_energy_wh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pzem Energy Wh"
+        },
+        "pzem_status": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Pzem Status",
+          "type": "string"
+        },
+        "record_crc32": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Record Crc32",
+          "type": "integer"
+        },
+        "reset_generation": {
+          "minimum": 0,
+          "title": "Reset Generation",
+          "type": "integer"
+        },
+        "sample_count": {
+          "maximum": 3600,
+          "minimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "sequence": {
+          "exclusiveMinimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "time_trusted": {
+          "title": "Time Trusted",
+          "type": "boolean"
+        },
+        "voltage_mv": {
+          "anyOf": [
+            {
+              "maximum": 300000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voltage Mv"
+        }
+      },
+      "required": [
+        "sequence",
+        "reset_generation",
+        "interval_start_utc",
+        "interval_end_utc",
+        "monotonic_start_us",
+        "monotonic_end_us",
+        "sample_count",
+        "expected_sample_count",
+        "energy_selection",
+        "pzem_status",
+        "time_trusted",
+        "record_crc32"
+      ],
+      "title": "DurableReading",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "protocol_id": {
+      "const": "pm-protocol/1.0.0",
+      "title": "Protocol Id",
+      "type": "string"
+    },
+    "records": {
+      "items": {
+        "$ref": "#/$defs/DurableReading"
+      },
+      "maxItems": 500,
+      "minItems": 1,
+      "title": "Records",
+      "type": "array"
+    }
+  },
+  "required": [
+    "protocol_id",
+    "records"
+  ],
+  "title": "ReadingBatchRequest",
+  "type": "object"
+}

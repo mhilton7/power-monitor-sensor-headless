@@ -1,0 +1,85 @@
+{
+  "contract_id": "pm-server-device-contract/1.0.0",
+  "protocol_id": "pm-protocol/1.0.0",
+  "firmware_repository": "https://github.com/mhilton7/power-monitor-sensor-headless",
+  "server_repository": "https://github.com/mhilton7/power-monitor-v2",
+  "requests": [
+    {
+      "name": "enrollment",
+      "method": "POST",
+      "path": "/api/v1/devices/enroll",
+      "authentication": "verified_tls_one_time_token",
+      "fixture": "test/vectors/device-enrollment.json",
+      "schema": "test/contracts/device-enrollment.schema.json"
+    },
+    {
+      "name": "heartbeat",
+      "method": "POST",
+      "path": "/api/v1/device/heartbeat",
+      "authentication": "pm-hmac-sha256-v1",
+      "fixture": "test/vectors/device-heartbeat.json",
+      "schema": "test/contracts/device-heartbeat.schema.json"
+    },
+    {
+      "name": "reading_batch",
+      "method": "POST",
+      "path": "/api/v1/device/readings",
+      "authentication": "pm-hmac-sha256-v1",
+      "fixture": "test/vectors/device-reading-batch.json",
+      "schema": "test/contracts/device-reading-batch.schema.json"
+    },
+    {
+      "name": "permanent_loss",
+      "method": "POST",
+      "path": "/api/v1/device/permanent-loss",
+      "authentication": "pm-hmac-sha256-v1",
+      "fixture": "test/vectors/device-permanent-loss.json",
+      "schema": "test/contracts/device-permanent-loss.schema.json"
+    }
+  ],
+  "downloads": [
+    {
+      "name": "firmware_image",
+      "method": "GET",
+      "path_template": "/api/v1/device/firmware/{release_id}",
+      "request_authentication": "pm-hmac-sha256-v1-empty-body",
+      "response_authentication": "pm-hmac-sha256-v1-full-body",
+      "range_policy": "safe_restart_without_range"
+    }
+  ],
+  "commands": [
+    {
+      "name": "ota_install",
+      "fixture": "test/vectors/device-ota-command.json",
+      "schema": "test/contracts/device-ota-command.schema.json",
+      "manifest_authentication": "per-device-server-to-device-hmac-sha256-base64",
+      "canonical_prefix": "PM-OTA-MANIFEST-V1"
+    },
+    {
+      "name": "destructive_commands",
+      "fixture": "test/vectors/device-destructive-commands.json",
+      "schema": "test/contracts/device-destructive-commands.schema.json",
+      "confirmation_token": "server_generated_16_byte_lowercase_hex",
+      "prepare_expiry_seconds": 600,
+      "reboot_policy": "persist_then_explicitly_invalidate_and_erase"
+    },
+    {
+      "name": "credential_rotation",
+      "fixture": "test/vectors/device-credential-rotation.json",
+      "schema": "test/contracts/device-credential-rotation.schema.json",
+      "payload_schema": "pm-credential-rotation/1.0.0",
+      "candidate_fingerprint": "sha256_lowercase_hex",
+      "prepare_result_authentication": "old_device_to_server",
+      "commit_result_authentication": "new_device_to_server",
+      "expiry_policy": "absolute_rfc3339_dormant_without_trusted_utc",
+      "reboot_policy": "durable_resume_until_authenticated_result_ack"
+    }
+  ],
+  "shared_contract_sha256": {
+    "device-heartbeat.schema.json": "00d4301afa3dc3fe3633858245d8e23a7369f4f2b0e2e7e75e3deed4241ccb45",
+    "device-reading-batch.schema.json": "80067a6ecd6ff6a89d3357500ae32fa2e700965a73e9132d1f1d3dd7b88b45c8",
+    "device-permanent-loss.schema.json": "80cbbc6912dfb096e9d30900da7583a572d519073b6055362143650e88da0fc0",
+    "server-device-response.schema.json": "750e18ce6776cf3b0ffb3546c5b222f853e57a77329d0439b7c931254cda2ddc",
+    "power-meter-v2.openapi.json": "1b5a66ad669ab560c07812b793f6214c5b78f362e7b6b4963326341453a3f621"
+  }
+}

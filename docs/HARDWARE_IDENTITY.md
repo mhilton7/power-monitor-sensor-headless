@@ -1,0 +1,7 @@
+# Hardware identity gate
+
+Checked 2026-08-13. The workspace contained no photographs of the actual marked PZEM unit, no included manual, and no electrical measurements. The supplied AliExpress short link did not resolve in the execution environment. The current Peacefair product page identifies a PZEM-004T 4.0, single phase, 100 A external CT, 80–260 V, 0–23 kW, 45–65 Hz, power factor and 9600-baud TTL output. It does not publish a revision-specific register map, TTL voltage levels, or definitive counter rollover/reset behavior.
+
+Consequently the implemented `pzem-004t-v4-classic-candidate` is a candidate, not a verified production identity. The driver sends Modbus-RTU slave 1/function 0x04/start 0/count 10 and parses the common 25-byte classic frame only when `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED=y`. Otherwise the physical driver returns `not_verified`; release-candidate builds cannot fabricate readings.
+
+A stable build requires exact ESP32-S3/module markings, PZEM model/revision/terminal markings, CT marking/type/rating, SD module marking, photo hashes, measured UART voltage behavior, confirmed 9600 8N1 frames/register scaling, energy-counter behavior, and a passing 72-hour marked-unit suite. The evidence must validate against `release/hardware-certification.schema.json`, match the firmware commit and image SHA-256, and pass `test/hardware/verify_evidence.py`. Simulation never satisfies this gate.

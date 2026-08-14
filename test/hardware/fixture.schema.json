@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["controller_origin", "marked_unit", "electrical", "operator", "reviewer"],
+  "properties": {
+    "controller_origin": {"type":"string", "pattern":"^https://"},
+    "marked_unit": {"$ref":"../../release/hardware-certification.schema.json#/properties/marked_unit"},
+    "electrical": {"$ref":"../../release/hardware-certification.schema.json#/properties/electrical"},
+    "operator": {"type":"string","minLength":1},
+    "reviewer": {"type":"string","minLength":1}
+  }
+}

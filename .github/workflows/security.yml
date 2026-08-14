@@ -1,0 +1,381 @@
+name: Firmware security gates
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    - cron: '17 9 * * 2'
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  source-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prohibited runtime and insecure TLS APIs
+        shell: bash
+        run: |
+          set +e
+          grep -RIlE --exclude-dir=.git --exclude='*.md' --exclude='security.yml' \
+            'setInsecure|ESPAsyncWebServer|AsyncTCP|mqtt|httpd_start|esp_http_server' . \
+            > "$RUNNER_TEMP/prohibited-runtime-files.txt"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            cat "$RUNNER_TEMP/prohibited-runtime-files.txt"
+            echo 'prohibited runtime or insecure TLS API found' >&2
+            exit 1
+          fi
+          test "$status" -eq 1
+      - name: Secret-shaped source scan
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          patterns = (
+              ('private-key', re.compile(
+                  r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----\s+'
+                  r'[A-Za-z0-9+/=\r\n]{80,}-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')),
+              ('certificate', re.compile(
+                  r'-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\r\n]{80,}'
+                  r'-----END CERTIFICATE-----')),
+              ('aws-access-key', re.compile(r'AKIA[0-9A-Z]{16}')),
+              ('google-api-key', re.compile(r'AIza[0-9A-Za-z_-]{35}')),
+              ('github-token', re.compile(r'gh[pousr]_[A-Za-z0-9_]{30,}')),
+              ('github-pat', re.compile(r'github_pat_[A-Za-z0-9_]{50,}')),
+              ('password-assignment', re.compile(r'password\s*=\s*(["\'])([^"\'\r\n]{8,})\1', re.I)),
+          )
+          allowed_synthetic_matches = {
+              ('test/host/test_firmware.py', 'password=' + '"' + 'hunter2' + '"'),
+          }
+          tracked = subprocess.run(
+              ['git', 'ls-files', '-z'], check=True, capture_output=True
+          ).stdout.decode('utf-8').split('\0')
+          violations = []
+          for name in filter(None, tracked):
+              source = Path(name)
+              if source.is_symlink():
+                  violations.append((name, 'tracked-symlink'))
+                  continue
+              content = source.read_bytes().decode('utf-8', errors='ignore')
+              for label, pattern in patterns:
+                  for match in pattern.finditer(content):
+                      if (name, match.group(0)) not in allowed_synthetic_matches:
+                          violations.append((name, label))
+          if violations:
+              rendered = '\n'.join(f'{name}: {label}' for name, label in sorted(set(violations)))
+              raise SystemExit('secret-shaped content found; values are redacted:\n' + rendered)
+          PY
+      - name: Reject committed generated or sensitive files
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path, PurePosixPath
+
+          raw = subprocess.run(
+              ['git', 'ls-files', '-z'], check=True, capture_output=True
+          ).stdout.decode('utf-8').split('\0')
+          violations = []
+          sensitive_suffixes = {
+              '.pem', '.key', '.p12', '.pfx', '.crt', '.cer', '.nvs', '.dump',
+              '.bin', '.elf', '.map', '.uf2',
+          }
+          for value in filter(None, raw):
+              path = PurePosixPath(value)
+              parts = path.parts
+              lower_parts = tuple(item.lower() for item in parts)
+              lower_directories = lower_parts[:-1]
+              generated = (
+                  any(re.fullmatch(r'build[^/]*', item) for item in lower_directories)
+                  or 'managed_components' in lower_directories
+                  or 'test-results' in lower_directories
+                  or any(lower_parts[index:index + 2] == ('release', 'out')
+                         for index in range(max(0, len(lower_parts) - 1)))
+                  or path.name.lower() in {'sdkconfig', 'sdkconfig.old'}
+              )
+              sensitive = path.suffix.lower() in sensitive_suffixes
+              bill_document = path.suffix.lower() == '.pdf' and 'bill' in path.name.lower()
+              detached_evidence = path.name.lower() == 'hardware-certification.json'
+              if (Path(value).is_symlink() or generated or sensitive or bill_document or
+                      detached_evidence):
+                  violations.append(value)
+          if violations:
+              raise SystemExit('committed generated/sensitive files:\n' + '\n'.join(violations))
+          PY
+      - name: Verify exact dependency declarations
+        shell: bash
+        run: |
+          grep -F 'component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469' dependencies.lock
+          grep -F 'version: 1.7.19~2' dependencies.lock
+          grep -F 'version: 6.0.2' dependencies.lock
+          grep -F 'version: "==1.7.19~2"' main/idf_component.yml
+          grep -F 'version: "==6.0.2"' main/idf_component.yml
+      - name: Require immutable workflow action and container pins
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          action = re.compile(r'^\s*(?:-\s+)?uses:\s*([^\s#]+)')
+          container = re.compile(r'^\s*container:\s*([^\s#]+)')
+          immutable_action = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.\-/]+@[0-9a-f]{40}$')
+          immutable_image = re.compile(r'^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$')
+          violations = []
+          containers = []
+          for path in sorted(Path('.github/workflows').glob('*.yml')):
+              for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+                  action_match = action.match(line)
+                  if action_match:
+                      value = action_match.group(1)
+                      if not value.startswith('./') and immutable_action.fullmatch(value) is None:
+                          violations.append(f'{path}:{number}: unpinned action {value}')
+                  container_match = container.match(line)
+                  if container_match:
+                      value = container_match.group(1)
+                      containers.append(value)
+                      if immutable_image.fullmatch(value) is None:
+                          violations.append(f'{path}:{number}: unpinned container {value}')
+          expected_idf_image = ('espressif/idf:v6.0.2@sha256:'
+                                '0d8c9773d48a327233f9c1d7c654ff0bcf133ae24503ea2e97a57cfe02b8cb67')
+          if len(containers) != 2 or any(value != expected_idf_image for value in containers):
+              violations.append('CI and release must use only the verified ESP-IDF v6.0.2 OCI digest')
+          if violations:
+              raise SystemExit('\n'.join(violations))
+          PY
+
+  dependency-vulnerability-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11.15'
+      - name: Query OSV for the exact dependency inventory
+        shell: bash
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          test_root = Path('test-results')
+          if test_root.exists() or test_root.is_symlink():
+              raise RuntimeError('clean security checkout unexpectedly contains test-results')
+          test_root.mkdir()
+          output = test_root / 'security'
+          output.mkdir()
+          lock = Path('dependencies.lock').read_bytes()
+          lock_text = lock.decode('utf-8')
+          required_lock_values = (
+              'component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469',
+              'version: 1.7.19~2',
+              'version: 6.0.2',
+          )
+          if not all(value in lock_text for value in required_lock_values):
+              raise SystemExit('dependencies.lock no longer matches the audited inventory')
+
+          subjects = [
+              {
+                  'name': 'espressif/esp-idf',
+                  'version': 'v6.0.2',
+                  'commit': '7101770dc6db2667b3c477cc31365dd1acd6db4e',
+                  'osv_query': {'commit': '7101770dc6db2667b3c477cc31365dd1acd6db4e'},
+              },
+              {
+                  'name': 'espressif/idf-extra-components/cjson',
+                  'version': '1.7.19~2',
+                  'commit': '1387cec28a9b40654be7892114bd7d26fcd3869c',
+                  'osv_query': {'commit': '1387cec28a9b40654be7892114bd7d26fcd3869c'},
+              },
+              {
+                  'name': 'DaveGamble/cJSON',
+                  'version': '1.7.19',
+                  'purl': 'pkg:github/DaveGamble/cJSON@v1.7.19',
+                  'osv_query': {
+                      'package': {'purl': 'pkg:github/DaveGamble/cJSON@v1.7.19'},
+                  },
+              },
+          ]
+
+          custom_inventory = {
+              'results': [{
+                  'source': {'path': 'dependencies.lock', 'type': 'lockfile'},
+                  'packages': [
+                      {'package': {'name': 'github.com/espressif/esp-idf',
+                                   'commit': subjects[0]['commit']}},
+                      {'package': {'name': 'github.com/espressif/idf-extra-components',
+                                   'commit': subjects[1]['commit']}},
+                  ],
+              }],
+          }
+          (output / 'osv-scanner-deps.json').write_text(
+              json.dumps(custom_inventory, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+
+          endpoint = 'https://api.osv.dev/v1/querybatch'
+          body = json.dumps({'queries': [subject['osv_query'] for subject in subjects]}).encode('utf-8')
+          request = urllib.request.Request(
+              endpoint,
+              data=body,
+              headers={
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'power-monitor-sensor-headless-dependency-audit/1.0',
+              },
+              method='POST',
+          )
+          with urllib.request.urlopen(request, timeout=90) as response:
+              if response.status != 200:
+                  raise RuntimeError(f'OSV returned HTTP {response.status}')
+              response_body = response.read(16 * 1024 * 1024 + 1)
+          if len(response_body) > 16 * 1024 * 1024:
+              raise RuntimeError('OSV response exceeded 16 MiB')
+          result = json.loads(response_body)
+          results = result.get('results') if isinstance(result, dict) else None
+          if not isinstance(results, list) or len(results) != len(subjects):
+              raise RuntimeError('OSV querybatch response did not cover every subject')
+          (output / 'osv-querybatch-response.json').write_text(
+              json.dumps(result, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+
+          vulnerabilities = []
+          for subject, item in zip(subjects, results, strict=True):
+              entries = item.get('vulns', []) if isinstance(item, dict) else None
+              if not isinstance(entries, list):
+                  raise RuntimeError(f'invalid OSV result for {subject["name"]}')
+              for vulnerability in entries:
+                  vulnerabilities.append({
+                      'id': vulnerability.get('id'),
+                      'subject': subject['name'],
+                      'aliases': sorted(vulnerability.get('aliases', [])),
+                  })
+
+          report = {
+              'schema': 'pm-dependency-audit/1.0.0',
+              'generated_at': dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
+              'result': 'pass' if not vulnerabilities else 'fail',
+              'dependencies_lock_sha256': hashlib.sha256(lock).hexdigest(),
+              'scanner': {
+                  'name': 'OSV querybatch API',
+                  'endpoint': endpoint,
+              },
+              'subjects': subjects,
+              'vulnerabilities': vulnerabilities,
+          }
+          (output / 'dependency-audit.json').write_text(
+              json.dumps(report, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          if vulnerabilities:
+              print(json.dumps({'result': 'fail', 'vulnerability_count': len(vulnerabilities)}))
+              raise SystemExit(1)
+          print(json.dumps({'result': 'pass', 'subject_count': len(subjects)}))
+          PY
+      - name: Run commit-pinned OSV-Scanner
+        id: osv_scan
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --output-file=test-results/security/osv-scanner-results.json
+            --format=json
+            --all-packages
+            --lockfile=requirements.txt:test/host/requirements.txt
+            --lockfile=osv-scanner:test-results/security/osv-scanner-deps.json
+      - name: Require complete OSV-Scanner inventory coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          report = json.loads(Path('test-results/security/osv-scanner-results.json').read_text())
+          results = report.get('results') if isinstance(report, dict) else None
+          if not isinstance(results, list) or len(results) != 2:
+              raise RuntimeError('OSV-Scanner did not return both requested lockfile inventories')
+          packages = [entry.get('package', {}) for result in results
+                      for entry in result.get('packages', [])]
+          actual_commits = {(item.get('name'), item.get('commit')) for item in packages
+                            if item.get('ecosystem') == 'GIT'}
+          expected_commits = {
+              ('github.com/espressif/esp-idf', '7101770dc6db2667b3c477cc31365dd1acd6db4e'),
+              ('github.com/espressif/idf-extra-components', '1387cec28a9b40654be7892114bd7d26fcd3869c'),
+          }
+          requirement = re.compile(
+              r'^([A-Za-z0-9_.-]+)==([^;\s]+)(?:;\s*.*?)?\s+'
+              r'--hash=sha256:[0-9a-f]{64}(?:\s+--hash=sha256:[0-9a-f]{64})*$'
+          )
+          expected_python = set()
+          logical_lines = []
+          pending = ''
+          for raw_line in Path('test/host/requirements.txt').read_text(
+                  encoding='utf-8').splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith('#'):
+                  continue
+              continued = line.endswith('\\')
+              pending += (' ' if pending else '') + line.removesuffix('\\').rstrip()
+              if continued:
+                  continue
+              logical_lines.append(pending)
+              pending = ''
+          if pending:
+              raise RuntimeError('unterminated host requirement continuation')
+          for line in logical_lines:
+              match = requirement.fullmatch(line)
+              if match is None:
+                  raise RuntimeError(f'unpinned or unhashed host requirement: {line}')
+              expected_python.add(match.groups())
+          actual_python = {(item.get('name'), item.get('version')) for item in packages
+                           if item.get('ecosystem') == 'PyPI'}
+          if actual_commits != expected_commits or actual_python != expected_python:
+              raise RuntimeError('OSV-Scanner inventory omitted or added a dependency')
+          PY
+      - name: Enforce OSV-Scanner findings
+        uses: google/osv-scanner-action/osv-reporter-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        with:
+          scan-args: |-
+            --output-files=test-results/security/osv-scanner-results.sarif
+            --new=test-results/security/osv-scanner-results.json
+            --gh-annotations=false
+            --fail-on-vuln=true
+      - name: Upload dependency vulnerability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dependency-vulnerability-audit
+          path: test-results/security/*
+          if-no-files-found: error
+          retention-days: 90
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@da24556b548a50705dd671f47852072ea4c105d9 # v4.7.1
+        with:
+          fail-on-severity: high

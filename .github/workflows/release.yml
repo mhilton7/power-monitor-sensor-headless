@@ -1,0 +1,546 @@
+name: Firmware release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: firmware-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag_authenticity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.promotion.outputs.version }}
+      stable: ${{ steps.promotion.outputs.stable }}
+      sdkconfig: ${{ steps.promotion.outputs.sdkconfig }}
+      configuration: ${{ steps.promotion.outputs.configuration }}
+      hardware_filename: ${{ steps.promotion.outputs.hardware_filename }}
+      source_commit: ${{ steps.promotion.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify promotion and bind the source commit
+        id: promotion
+        shell: bash
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]] || {
+            echo "unsupported release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          }
+          test "${#version}" -le 31
+          if [[ "$version" == *-rc.* ]]; then
+            echo 'stable=false' >> "$GITHUB_OUTPUT"
+            echo 'sdkconfig=sdkconfig.release-candidate' >> "$GITHUB_OUTPUT"
+            echo 'configuration=release-candidate' >> "$GITHUB_OUTPUT"
+            echo 'hardware_filename=hardware-certification-status.json' >> "$GITHUB_OUTPUT"
+          else
+            echo 'stable=true' >> "$GITHUB_OUTPUT"
+            echo 'sdkconfig=sdkconfig.release' >> "$GITHUB_OUTPUT"
+            echo 'configuration=release' >> "$GITHUB_OUTPUT"
+            echo 'hardware_filename=hardware-certification.json' >> "$GITHUB_OUTPUT"
+          fi
+          source_commit="$(git rev-parse HEAD)"
+          test "$GITHUB_SHA" = "$source_commit"
+          local_tag_object="$(git rev-parse "${GITHUB_REF_NAME}^{tag}")"
+          test -z "$(git status --porcelain)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "LOCAL_TAG_OBJECT=$local_tag_object" >> "$GITHUB_ENV"
+          echo "SOURCE_COMMIT=$source_commit" >> "$GITHUB_ENV"
+      - name: Require a valid cryptographic signature on the annotated release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          def require(condition: bool, message: str) -> None:
+              if not condition:
+                  raise RuntimeError(message)
+
+          api = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+          repository = os.environ['GITHUB_REPOSITORY']
+          tag_name = os.environ['GITHUB_REF_NAME']
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {os.environ["GH_TOKEN"]}',
+              'User-Agent': 'power-monitor-sensor-headless-release-gate/1.0',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+
+          def get_json(url: str) -> dict:
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  require(response.status == 200, f'GitHub API returned HTTP {response.status}')
+                  body = response.read(4 * 1024 * 1024 + 1)
+              require(len(body) <= 4 * 1024 * 1024, 'GitHub API response exceeded 4 MiB')
+              value = json.loads(body)
+              require(isinstance(value, dict), 'GitHub API returned a non-object')
+              return value
+
+          encoded_tag = urllib.parse.quote(tag_name, safe='')
+          reference = get_json(f'{api}/repos/{repository}/git/ref/tags/{encoded_tag}')
+          tag_reference = reference.get('object', {})
+          require(tag_reference.get('type') == 'tag', 'release tag must be annotated, not lightweight')
+          require(tag_reference.get('sha') == os.environ['LOCAL_TAG_OBJECT'],
+                  'local and GitHub release tag objects differ')
+          tag = get_json(f'{api}/repos/{repository}/git/tags/{tag_reference["sha"]}')
+          verification = tag.get('verification', {})
+          require(verification.get('verified') is True and verification.get('reason') == 'valid',
+                  f'release tag signature rejected: {verification.get("reason", "missing") }')
+          require(bool(verification.get('signature')) and bool(verification.get('payload')) and
+                  bool(verification.get('verified_at')), 'release tag verification proof is incomplete')
+          require(tag.get('tag') == tag_name, 'signed tag name differs from the pushed ref')
+          target = tag.get('object', {})
+          require(target.get('type') == 'commit' and target.get('sha') == os.environ['SOURCE_COMMIT'],
+                  'signed release tag does not target the checked-out source commit')
+          print(json.dumps({'result': 'pass', 'tag': tag_name, 'commit': target['sha']}))
+          PY
+
+  certification_input:
+    needs: tag_authenticity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Stage pending RC hardware status
+        if: needs.tag_authenticity.outputs.stable == 'false'
+        shell: bash
+        run: |
+          mkdir -p test-results/release-input
+          cp release/hardware-certification-status.json \
+            test-results/release-input/hardware-certification-status.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          value = json.loads(Path('test-results/release-input/hardware-certification-status.json').read_text())
+          if (value.get('schema') != 'pm-hardware-certification-status/1.0.0' or
+                  value.get('status') != 'pending' or value.get('production_gate') != 'closed'):
+              raise SystemExit('RC hardware status must remain pending with the production gate closed')
+          PY
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: needs.tag_authenticity.outputs.stable == 'true'
+        with:
+          python-version: '3.11.15'
+          cache: pip
+      - name: Install pinned certification validator
+        if: needs.tag_authenticity.outputs.stable == 'true'
+        run: python -m pip install --disable-pip-version-check --require-hashes -r test/host/requirements.txt
+      - name: Fetch hash-anchored evidence from the signed detached certification release
+        if: needs.tag_authenticity.outputs.stable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.tag_authenticity.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.tag_authenticity.outputs.source_commit }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          def require(condition: bool, message: str) -> None:
+              if not condition:
+                  raise RuntimeError(message)
+
+          api = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+          repository = os.environ['GITHUB_REPOSITORY']
+          source_commit = os.environ['SOURCE_COMMIT']
+          require(os.environ['GITHUB_SHA'] == source_commit,
+                  'workflow SHA differs from the checked-out source commit')
+          certification_tag = f'hardware-certification-{os.environ["GITHUB_SHA"]}'
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {os.environ["GH_TOKEN"]}',
+              'User-Agent': 'power-monitor-sensor-headless-certification-gate/1.0',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+
+          def get_json(url: str) -> dict:
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  require(response.status == 200, f'GitHub API returned HTTP {response.status}')
+                  body = response.read(4 * 1024 * 1024 + 1)
+              require(len(body) <= 4 * 1024 * 1024, 'GitHub API response exceeded 4 MiB')
+              value = json.loads(body)
+              require(isinstance(value, dict), 'GitHub API returned a non-object')
+              return value
+
+          encoded_tag = urllib.parse.quote(certification_tag, safe='')
+          reference = get_json(f'{api}/repos/{repository}/git/ref/tags/{encoded_tag}')
+          tag_reference = reference.get('object', {})
+          require(tag_reference.get('type') == 'tag', 'certification tag must be annotated, not lightweight')
+          tag = get_json(f'{api}/repos/{repository}/git/tags/{tag_reference.get("sha", "missing")}')
+          verification = tag.get('verification', {})
+          require(verification.get('verified') is True and verification.get('reason') == 'valid',
+                  f'certification tag signature rejected: {verification.get("reason", "missing")}')
+          require(bool(verification.get('signature')) and bool(verification.get('verified_at')),
+                  'certification tag verification proof is incomplete')
+          require(tag.get('tag') == certification_tag, 'signed certification tag name mismatch')
+          target = tag.get('object', {})
+          require(target.get('type') == 'commit' and target.get('sha') == source_commit,
+                  'certification tag does not target the release source commit')
+          payload_lines = verification.get('payload', '').splitlines()
+          digest_lines = [line for line in payload_lines
+                          if line.startswith('hardware-certification-sha256: ')]
+          require(len(digest_lines) == 1, 'signed certification tag must contain exactly one evidence digest')
+          match = re.fullmatch(r'hardware-certification-sha256: ([0-9a-f]{64})', digest_lines[0])
+          require(match is not None, 'signed certification evidence digest is malformed')
+          expected_digest = match.group(1)
+
+          release = get_json(f'{api}/repos/{repository}/releases/tags/{encoded_tag}')
+          require(release.get('tag_name') == certification_tag and release.get('draft') is False,
+                  'certification release is missing or is still a draft')
+          assets = release.get('assets', [])
+          require(isinstance(assets, list) and len(assets) == 1 and
+                  assets[0].get('name') == 'hardware-certification.json',
+                  'certification release must contain only hardware-certification.json')
+          asset = assets[0]
+          require(isinstance(asset.get('size'), int) and 0 < asset['size'] <= 4 * 1024 * 1024,
+                  'certification asset size is invalid')
+          expected_asset_prefix = f'{api}/repos/{repository}/releases/assets/'
+          require(asset.get('url', '').startswith(expected_asset_prefix), 'unexpected certification asset URL')
+
+          class StripAuthorizationOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, msg, headers_value, new_url):
+                  redirected = super().redirect_request(request, fp, code, msg, headers_value, new_url)
+                  if redirected is not None:
+                      old_origin = urllib.parse.urlsplit(request.full_url).netloc
+                      new_origin = urllib.parse.urlsplit(new_url).netloc
+                      if old_origin != new_origin:
+                          redirected.headers.pop('Authorization', None)
+                          redirected.unredirected_hdrs.pop('Authorization', None)
+                  return redirected
+
+          opener = urllib.request.build_opener(StripAuthorizationOnCrossOriginRedirect())
+          asset_headers = dict(headers)
+          asset_headers['Accept'] = 'application/octet-stream'
+          with opener.open(urllib.request.Request(asset['url'], headers=asset_headers), timeout=60) as response:
+              content = response.read(4 * 1024 * 1024 + 1)
+          require(len(content) == asset['size'], 'downloaded certification asset size mismatch')
+          actual_digest = hashlib.sha256(content).hexdigest()
+          require(actual_digest == expected_digest,
+                  'certification asset does not match the digest in the signed tag annotation')
+          document = json.loads(content)
+          firmware = document.get('firmware', {}) if isinstance(document, dict) else {}
+          require(firmware.get('commit') == source_commit, 'certification document commit mismatch')
+          require(firmware.get('version') == os.environ['RELEASE_VERSION'],
+                  'certification document version mismatch')
+
+          destination = Path('test-results/release-input/hardware-certification.json')
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          temporary = destination.with_suffix('.json.part')
+          temporary.write_bytes(content)
+          temporary.replace(destination)
+          print(json.dumps({'result': 'pass', 'tag': certification_tag,
+                            'evidence_sha256': actual_digest}))
+          PY
+      - name: Validate stable evidence before compilation
+        if: needs.tag_authenticity.outputs.stable == 'true'
+        run: >-
+          python test/hardware/verify_evidence.py
+          test-results/release-input/hardware-certification.json
+          --firmware-commit "${{ needs.tag_authenticity.outputs.source_commit }}"
+      - name: Upload immutable release hardware input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hardware-certification-input
+          path: test-results/release-input/hardware-certification*.json
+          if-no-files-found: error
+          retention-days: 90
+
+  complete_ci:
+    needs: tag_authenticity
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  complete_security:
+    needs: tag_authenticity
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security.yml
+
+  build_release:
+    needs: [tag_authenticity, certification_input, complete_ci, complete_security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container: espressif/idf:v6.0.2@sha256:0d8c9773d48a327233f9c1d7c654ff0bcf133ae24503ea2e97a57cfe02b8cb67
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify checked-out release source and pinned framework
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ needs.tag_authenticity.outputs.source_commit }}"
+          test -z "$(git status --porcelain)"
+          test "$(git -C "$IDF_PATH" describe --tags --exact-match)" = v6.0.2
+          test "$(git -C "$IDF_PATH" rev-parse HEAD)" = 7101770dc6db2667b3c477cc31365dd1acd6db4e
+      - name: Install pinned release validators
+        run: python -m pip install --disable-pip-version-check --require-hashes -r test/host/requirements.txt
+      - name: Re-run host evidence for the release artifact
+        run: python tools/run_host_tests.py
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hardware-certification-input
+          path: test-results/release-input
+      - name: Build pinned release profile
+        run: >-
+          /opt/esp/entrypoint.sh idf.py -B build-release
+          -D "SDKCONFIG=build-release/sdkconfig"
+          -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;${{ needs.tag_authenticity.outputs.sdkconfig }}"
+          -D "PM_FIRMWARE_VERSION=${{ needs.tag_authenticity.outputs.version }}"
+          set-target esp32s3 build
+      - name: Audit the compiled external dependency set
+        run: >-
+          python tools/audit_dependencies.py
+          --output test-results/security/dependency-audit.json
+      - name: Bind the tag version to the compiled firmware descriptor
+        env:
+          RELEASE_VERSION: ${{ needs.tag_authenticity.outputs.version }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import struct
+          from pathlib import Path
+
+          def require(condition: bool, message: str) -> None:
+              if not condition:
+                  raise RuntimeError(message)
+
+          version = os.environ['RELEASE_VERSION']
+          description = json.loads(Path('build-release/project_description.json').read_text())
+          require(description.get('project_name') == 'power-monitor-sensor-headless',
+                  'compiled project name mismatch')
+          require(description.get('target') == 'esp32s3', 'compiled target mismatch')
+          require(description.get('project_version') == version,
+                  'tag version differs from ESP-IDF project description')
+
+          image = Path('build-release/power-monitor-sensor-headless.bin').read_bytes()
+          require(len(image) >= 176, 'firmware image is too short for esp_app_desc_t')
+          require(len(image) < 7077888, 'firmware exceeds the release OTA margin')
+          require(struct.unpack_from('<I', image, 32)[0] == 0xABCD5432,
+                  'firmware does not contain a valid ESP-IDF app descriptor')
+          decode = lambda offset, size: image[offset:offset + size].split(b'\0', 1)[0].decode('utf-8')
+          require(decode(48, 32) == version, 'tag version differs from embedded firmware version')
+          require(decode(80, 32) == 'power-monitor-sensor-headless',
+                  'embedded firmware project name mismatch')
+          require(decode(144, 32).startswith('v6.0.2'), 'embedded firmware ESP-IDF version mismatch')
+          print(json.dumps({'result': 'pass', 'version': version}))
+          PY
+      - name: Bind stable certification to the compiled image
+        if: needs.tag_authenticity.outputs.stable == 'true'
+        shell: bash
+        run: |
+          image_sha256="$(sha256sum build-release/power-monitor-sensor-headless.bin | cut -d ' ' -f 1)"
+          python test/hardware/verify_evidence.py \
+            test-results/release-input/hardware-certification.json \
+            --firmware-commit "${{ needs.tag_authenticity.outputs.source_commit }}" \
+            --firmware-sha256 "$image_sha256"
+      - name: Assemble artifacts from verified inputs
+        env:
+          VERSION: ${{ needs.tag_authenticity.outputs.version }}
+          CONFIGURATION: ${{ needs.tag_authenticity.outputs.configuration }}
+          HARDWARE_FILENAME: ${{ needs.tag_authenticity.outputs.hardware_filename }}
+        shell: bash
+        run: |
+          mkdir -p "release/out/$VERSION"
+          python tools/build_release.py \
+            --build-dir build-release \
+            --output-dir "release/out/$VERSION" \
+            --version "$VERSION" \
+            --build-number "$GITHUB_RUN_NUMBER" \
+            --download-base "https://github.com/mhilton7/power-monitor-sensor-headless/releases/download/$GITHUB_REF_NAME" \
+            --hardware-status "test-results/release-input/$HARDWARE_FILENAME" \
+            --configuration "$CONFIGURATION" \
+            --server-tag "$GITHUB_REF_NAME" \
+            --dependency-audit-report test-results/security/dependency-audit.json
+      - name: Verify the complete release artifact set
+        env:
+          VERSION: ${{ needs.tag_authenticity.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.tag_authenticity.outputs.source_commit }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('release/out') / os.environ['VERSION']
+          if any(path.is_symlink() or not path.is_file() for path in root.iterdir()):
+              raise RuntimeError('release output contains a non-file entry')
+          expected = {}
+          for line in (root / 'SHA256SUMS').read_text(encoding='ascii').splitlines():
+              digest, name = line.split('  ', 1)
+              if name in expected or '/' in name or '\\' in name:
+                  raise RuntimeError('invalid or duplicate SHA256SUMS entry')
+              expected[name] = digest
+          actual_names = {path.name for path in root.iterdir()
+                          if path.is_file() and path.name != 'SHA256SUMS'}
+          if set(expected) != actual_names:
+              raise RuntimeError('SHA256SUMS does not cover the exact artifact set')
+          for name, digest in expected.items():
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if actual != digest:
+                  raise RuntimeError(f'checksum mismatch: {name}')
+          firmware_digest = hashlib.sha256((root / 'firmware.bin').read_bytes()).hexdigest()
+          manifest = json.loads((root / 'manifest.json').read_text())
+          compatibility = json.loads((root / 'compatibility.json').read_text())
+          audit = json.loads((root / 'dependency-audit.json').read_text())
+          if (manifest.get('version') != os.environ['VERSION'] or
+                  manifest.get('git_commit') != os.environ['SOURCE_COMMIT'] or
+                  manifest.get('image_sha256') != firmware_digest):
+              raise RuntimeError('manifest is not bound to the tag commit and firmware')
+          firmware = compatibility.get('firmware', {})
+          if (firmware.get('tag') != os.environ['GITHUB_REF_NAME'] or
+                  firmware.get('commit') != os.environ['SOURCE_COMMIT'] or
+                  firmware.get('image_sha256') != firmware_digest):
+              raise RuntimeError('compatibility metadata is not bound to the release')
+          if audit.get('result') != 'pass' or audit.get('vulnerabilities') != []:
+              raise RuntimeError('release dependency audit did not pass')
+          print(json.dumps({'result': 'pass', 'artifact_count': len(actual_names),
+                            'firmware_sha256': firmware_digest}))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: power-monitor-sensor-${{ github.ref_name }}
+          path: release/out/${{ needs.tag_authenticity.outputs.version }}/*
+          if-no-files-found: error
+          retention-days: 90
+
+  attest_release:
+    needs: [tag_authenticity, build_release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: power-monitor-sensor-${{ github.ref_name }}
+          path: release-package
+      - name: Re-verify downloaded release package
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          root = Path('release-package')
+          if any(path.is_symlink() or not path.is_file() for path in root.iterdir()):
+              raise RuntimeError('downloaded release package contains a non-file entry')
+          expected = {}
+          for line in (root / 'SHA256SUMS').read_text(encoding='ascii').splitlines():
+              digest, name = line.split('  ', 1)
+              if name in expected or '/' in name or '\\' in name:
+                  raise RuntimeError('invalid or duplicate SHA256SUMS entry')
+              expected[name] = digest
+          actual = {path.name for path in root.iterdir()
+                    if path.is_file() and path.name != 'SHA256SUMS'}
+          if set(expected) != actual:
+              raise RuntimeError('downloaded artifact set differs from SHA256SUMS')
+          for name, digest in expected.items():
+              if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
+                  raise RuntimeError(f'downloaded artifact checksum mismatch: {name}')
+          required = {'firmware.bin', 'sbom.spdx.json', 'provenance.json',
+                      'dependency-audit.json', 'manifest.json', 'compatibility.json'}
+          if not required.issubset(actual):
+              raise RuntimeError('downloaded release package is incomplete')
+          PY
+      - name: Attest firmware build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-package/firmware.bin
+      - name: Attest firmware SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release-package/firmware.bin
+          sbom-path: release-package/sbom.spdx.json
+
+  publish_release:
+    needs: [tag_authenticity, build_release, attest_release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: power-monitor-sensor-${{ github.ref_name }}
+          path: release-package
+      - name: Re-verify assets immediately before publication
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          root = Path('release-package')
+          if any(path.is_symlink() or not path.is_file() for path in root.iterdir()):
+              raise RuntimeError('publication package contains a non-file entry')
+          expected = {}
+          for line in (root / 'SHA256SUMS').read_text(encoding='ascii').splitlines():
+              digest, name = line.split('  ', 1)
+              if name in expected or '/' in name or '\\' in name:
+                  raise RuntimeError('invalid or duplicate SHA256SUMS entry')
+              expected[name] = digest
+          actual = {path.name for path in root.iterdir()
+                    if path.is_file() and path.name != 'SHA256SUMS'}
+          if set(expected) != actual:
+              raise RuntimeError('publication artifact set differs from SHA256SUMS')
+          for name, digest in expected.items():
+              if hashlib.sha256((root / name).read_bytes()).hexdigest() != digest:
+                  raise RuntimeError(f'publication checksum mismatch: {name}')
+          if 'RELEASE_NOTES.md' not in actual:
+              raise RuntimeError('release notes are missing from the publication set')
+          PY
+      - name: Publish GitHub prerelease assets
+        if: needs.tag_authenticity.outputs.stable == 'false'
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          prerelease: true
+          name: PowerMeter sensor ${{ github.ref_name }}
+          body_path: release-package/RELEASE_NOTES.md
+          files: release-package/*
+          fail_on_unmatched_files: true
+      - name: Publish GitHub stable release assets
+        if: needs.tag_authenticity.outputs.stable == 'true'
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          prerelease: false
+          name: PowerMeter sensor ${{ github.ref_name }}
+          body_path: release-package/RELEASE_NOTES.md
+          files: release-package/*
+          fail_on_unmatched_files: true
