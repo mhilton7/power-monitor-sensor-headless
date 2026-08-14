@@ -312,7 +312,7 @@ jobs:
           path: test-results/release-input
       - name: Build pinned release profile
         run: >-
-          idf.py -B build-release
+          python "$IDF_PATH/tools/idf.py" -B build-release
           -D "SDKCONFIG=build-release/sdkconfig"
           -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;${{ needs.tag_authenticity.outputs.sdkconfig }}"
           -D "PM_FIRMWARE_VERSION=${{ needs.tag_authenticity.outputs.version }}"
