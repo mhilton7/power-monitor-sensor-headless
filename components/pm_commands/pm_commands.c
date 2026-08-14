@@ -31,9 +31,26 @@ static uint32_t ledger_crc(const pm_command_ledger_t *ledger)
 
 static bool command_valid(const pm_command_t *command)
 {
-    return command->command_id[0] != '\0' && command->type < PM_COMMAND_TYPE_COUNT &&
-           command->state <= PM_COMMAND_ROLLED_BACK && command->progress_percent <= 100U &&
-           command->crc32 == command_crc(command);
+    if (command->command_id[0] == '\0' || command->type >= PM_COMMAND_TYPE_COUNT ||
+        command->state > PM_COMMAND_ROLLED_BACK || command->progress_percent > 100U ||
+        (command->result_ack_required && command->state != PM_COMMAND_SUCCEEDED) ||
+        command->crc32 != command_crc(command) ||
+        memchr(command->payload, '\0', sizeof(command->payload)) == NULL) {
+        return false;
+    }
+    if (command->payload_redacted) {
+        for (size_t i = 0U; i < sizeof(command->payload); ++i) {
+            if (command->payload[i] != '\0') {
+                return false;
+            }
+        }
+        return true;
+    }
+    uint8_t digest[PM_SHA256_SIZE] = {0};
+    pm_sha256((const uint8_t *)command->payload, strlen(command->payload), digest);
+    const bool valid = pm_constant_time_equal(digest, command->payload_sha256, sizeof(digest));
+    memset(digest, 0, sizeof(digest));
+    return valid;
 }
 
 static bool command_terminal(pm_command_state_t state)
@@ -113,13 +130,20 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
 {
     if (ledger == NULL || incoming == NULL || stored == NULL || duplicate == NULL ||
         incoming->command_id[0] == '\0' || incoming->idempotency_key[0] == '\0' ||
-        incoming->type >= PM_COMMAND_TYPE_COUNT) {
+        incoming->type >= PM_COMMAND_TYPE_COUNT ||
+        memchr(incoming->payload, '\0', sizeof(incoming->payload)) == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
         if (strcmp(ledger->entries[i].command_id, incoming->command_id) == 0 ||
             strcmp(ledger->entries[i].idempotency_key, incoming->idempotency_key) == 0) {
-            if (ledger->entries[i].type != incoming->type || strcmp(ledger->entries[i].payload, incoming->payload) != 0) {
+            uint8_t incoming_digest[PM_SHA256_SIZE] = {0};
+            pm_sha256((const uint8_t *)incoming->payload, strlen(incoming->payload), incoming_digest);
+            const bool matches = ledger->entries[i].type == incoming->type &&
+                                 pm_constant_time_equal(ledger->entries[i].payload_sha256,
+                                                        incoming_digest, sizeof(incoming_digest));
+            memset(incoming_digest, 0, sizeof(incoming_digest));
+            if (!matches) {
                 return ESP_ERR_INVALID_CRC;
             }
             *stored = &ledger->entries[i];
@@ -128,6 +152,8 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
         }
     }
     pm_command_t candidate = *incoming;
+    pm_sha256((const uint8_t *)candidate.payload, strlen(candidate.payload), candidate.payload_sha256);
+    candidate.payload_redacted = false;
     candidate.state = now_utc_ms > candidate.expires_utc_ms ? PM_COMMAND_EXPIRED : PM_COMMAND_ACCEPTED;
     candidate.progress_percent = 0U;
     candidate.crc32 = command_crc(&candidate);
@@ -135,7 +161,8 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
     for (size_t offset = 0U; offset < PM_COMMAND_LEDGER_SIZE; ++offset) {
         const size_t index = (ledger->next + offset) % PM_COMMAND_LEDGER_SIZE;
         if (ledger->entries[index].command_id[0] == '\0' ||
-            command_terminal(ledger->entries[index].state)) {
+            (command_terminal(ledger->entries[index].state) &&
+             !ledger->entries[index].result_ack_required)) {
             selected = index;
             break;
         }
@@ -174,6 +201,41 @@ esp_err_t pm_command_transition(pm_command_ledger_t *ledger, pm_command_t *comma
     command->state = state;
     command->progress_percent = progress_percent;
     command->result_code = result_code;
+    return persist(ledger);
+}
+
+esp_err_t pm_command_acknowledge_result(pm_command_ledger_t *ledger, const char *command_id)
+{
+    if (ledger == NULL || command_id == NULL || strlen(command_id) != PM_COMMAND_ID_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
+        pm_command_t *command = &ledger->entries[i];
+        if (strcmp(command->command_id, command_id) != 0) {
+            continue;
+        }
+        if (command->state != PM_COMMAND_SUCCEEDED) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!command->result_ack_required) {
+            return ESP_OK;
+        }
+        command->result_ack_required = false;
+        return persist(ledger);
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t pm_command_zeroize_payload(pm_command_ledger_t *ledger, pm_command_t *command)
+{
+    if (ledger == NULL || command == NULL || command->command_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (command->payload_redacted) {
+        return persist(ledger);
+    }
+    memset(command->payload, 0, sizeof(command->payload));
+    command->payload_redacted = true;
     return persist(ledger);
 }
 

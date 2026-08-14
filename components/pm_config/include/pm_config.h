@@ -77,10 +77,14 @@ esp_err_t pm_config_load(pm_config_t *config);
 esp_err_t pm_config_begin(const pm_config_t *candidate, pm_config_transaction_t *transaction);
 esp_err_t pm_config_mark_network_tested(pm_config_transaction_t *transaction);
 esp_err_t pm_config_commit(pm_config_transaction_t *transaction);
+esp_err_t pm_config_load_staged(char slot, uint32_t expected_generation, pm_config_t *config);
+esp_err_t pm_config_activate_staged(char slot, uint32_t expected_generation);
+esp_err_t pm_config_discard_staged(char slot, uint32_t expected_generation);
+esp_err_t pm_config_discard_inactive_generation(uint32_t expected_generation);
+esp_err_t pm_config_erase_inactive(void);
 void pm_config_abort(pm_config_transaction_t *transaction);
 bool pm_config_secret_field_name(const char *name);
 
 #ifdef __cplusplus
 }
 #endif
-

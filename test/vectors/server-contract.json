@@ -62,6 +62,17 @@
       "confirmation_token": "server_generated_16_byte_lowercase_hex",
       "prepare_expiry_seconds": 600,
       "reboot_policy": "persist_then_explicitly_invalidate_and_erase"
+    },
+    {
+      "name": "credential_rotation",
+      "fixture": "test/vectors/device-credential-rotation.json",
+      "schema": "test/contracts/device-credential-rotation.schema.json",
+      "payload_schema": "pm-credential-rotation/1.0.0",
+      "candidate_fingerprint": "sha256_lowercase_hex",
+      "prepare_result_authentication": "old_device_to_server",
+      "commit_result_authentication": "new_device_to_server",
+      "expiry_policy": "absolute_rfc3339_dormant_without_trusted_utc",
+      "reboot_policy": "durable_resume_until_authenticated_result_ack"
     }
   ],
   "shared_contract_sha256": {

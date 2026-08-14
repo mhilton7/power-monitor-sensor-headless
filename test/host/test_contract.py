@@ -39,6 +39,7 @@ class ServerContractTests(unittest.TestCase):
         self.validate("device-permanent-loss.json", "device-permanent-loss.schema.json")
         self.validate("device-ota-command.json", "device-ota-command.schema.json")
         self.validate("device-destructive-commands.json", "device-destructive-commands.schema.json")
+        self.validate("device-credential-rotation.json", "device-credential-rotation.schema.json")
 
     def test_manifest_has_only_inspected_post_endpoints(self) -> None:
         manifest = self.load(VECTORS, "server-contract.json")
@@ -185,6 +186,87 @@ class ServerContractTests(unittest.TestCase):
                 "server-device-response.schema.json",
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
+
+    def test_credential_rotation_payloads_results_and_key_cutover_are_exact(self) -> None:
+        vectors = self.validate(
+            "device-credential-rotation.json", "device-credential-rotation.schema.json"
+        )
+        response_schema = self.load(CONTRACTS, "server-device-response.schema.json")
+        command_validator = jsonschema.Draft202012Validator(
+            response_schema["$defs"]["CommandEnvelope"],
+            format_checker=jsonschema.FormatChecker(),
+        )
+        heartbeat_schema = self.load(CONTRACTS, "device-heartbeat.schema.json")
+        result_validator = jsonschema.Draft202012Validator(
+            heartbeat_schema["$defs"]["CommandResult"],
+            format_checker=jsonschema.FormatChecker(),
+        )
+        for command in vectors["commands"]:
+            self.assertEqual([], [error.message for error in command_validator.iter_errors(command)])
+        for result in vectors["results"]:
+            self.assertEqual([], [error.message for error in result_validator.iter_errors(result)])
+
+        prepare, commit, cancel = (item["payload"] for item in vectors["commands"])
+        self.assertEqual(
+            {"schema", "rotation_id", "device_secret_hex", "credential_fingerprint",
+             "overlap_expires_at"},
+            set(prepare),
+        )
+        self.assertEqual(
+            {"schema", "rotation_id", "credential_fingerprint"}, set(commit)
+        )
+        self.assertEqual({"schema", "rotation_id", "cancelled"}, set(cancel))
+        self.assertEqual(
+            hashlib.sha256(bytes.fromhex(prepare["device_secret_hex"])).hexdigest(),
+            prepare["credential_fingerprint"],
+        )
+        self.assertEqual(prepare["rotation_id"], commit["rotation_id"])
+        self.assertEqual(prepare["rotation_id"], cancel["rotation_id"])
+        self.assertNotIn("device_secret", json.dumps(vectors["results"]))
+        self.assertEqual("old_device_to_server", vectors["authentication"]["prepare_result"])
+        self.assertEqual("new_device_to_server", vectors["authentication"]["commit_result"])
+
+        prepare_result, commit_result, cancel_result = (
+            item["evidence"] for item in vectors["results"]
+        )
+        self.assertEqual(
+            {"rotation_id", "credential_fingerprint", "ready"}, set(prepare_result)
+        )
+        self.assertEqual(
+            {"rotation_id", "credential_fingerprint", "activated"}, set(commit_result)
+        )
+        self.assertEqual({"rotation_id", "cancelled"}, set(cancel_result))
+
+        source = (ROOT / "main" / "app_main.c").read_text(encoding="utf-8")
+        network = (ROOT / "components" / "pm_network" / "pm_network.c").read_text(encoding="utf-8")
+        command_source = (ROOT / "components" / "pm_commands" / "pm_commands.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED", source)
+        self.assertIn("PM_ROTATION_PHASE_COMMAND_RESULT_DURABLE", source)
+        self.assertIn("rotation_cleanup_acknowledged", source)
+        self.assertIn("pm_command_zeroize_payload(&s_commands, prepare)", source)
+        self.assertIn(
+            "if (!prepare->payload_redacted || s_rotation_payload_redaction_retry)",
+            source,
+        )
+        self.assertIn("s_rotation_payload_redaction_retry = error != ESP_OK", source)
+        self.assertIn("now_utc_ms > s_rotation_record.overlap_expires_utc_ms", source)
+        self.assertNotIn("s_rotation_record.phase = PM_ROTATION_PHASE_NONE", source)
+        self.assertIn("enqueue_interrupted_rotation_commands", source)
+        self.assertIn('strcmp(capability, "credential_rotation_v1")', network)
+        self.assertIn("zeroize_rotation_secrets(commands)", network)
+        self.assertIn("secure_zero_memory(serialized, strlen(serialized))", network)
+        self.assertIn("secure_zero_memory(response, sizeof(response))", network)
+        self.assertIn("!ledger->entries[index].result_ack_required", command_source)
+        self.assertIn("pm_command_acknowledge_result", source)
+        partitions = (ROOT / "partitions.csv").read_text(encoding="utf-8")
+        self.assertIn("nvs,         data, nvs,       0x9000,   0x22000,", partitions)
+        self.assertNotIn("pm_recovery", partitions)
+        self.assertIn("PM_NVS_RAW_DURABLE_BLOB_BUDGET", source)
+        release_builder = (ROOT / "tools" / "build_release.py").read_text(encoding="utf-8")
+        self.assertIn("('0x2D000', 'ota_data_initial.bin')", release_builder)
+        self.assertIn("('0x40000', 'firmware.bin')", release_builder)
 
     def test_zero_is_preserved_and_missing_evidence_is_null(self) -> None:
         heartbeat = self.load(VECTORS, "device-heartbeat.json")

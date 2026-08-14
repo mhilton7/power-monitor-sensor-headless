@@ -35,6 +35,14 @@ static portMUX_TYPE s_live_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_live_present;
 static volatile bool s_sync_requested;
 
+static void secure_zero_memory(void *value, size_t length)
+{
+    volatile uint8_t *bytes = (volatile uint8_t *)value;
+    while (length-- > 0U) {
+        *bytes++ = 0U;
+    }
+}
+
 void pm_network_scheduler_init(pm_network_scheduler_t *scheduler, int64_t now_us, uint32_t heartbeat_seconds)
 {
     if (scheduler != NULL) {
@@ -895,7 +903,7 @@ static int64_t days_from_civil(int year, unsigned int month, unsigned int day)
     return (int64_t)era * 146097 + (int64_t)day_of_era - 719468;
 }
 
-static bool parse_rfc3339_ms(const char *value, int64_t *utc_ms)
+bool pm_network_parse_rfc3339_ms(const char *value, int64_t *utc_ms)
 {
     if (value == NULL || utc_ms == NULL || strlen(value) < 20U) {
         return false;
@@ -968,7 +976,8 @@ static bool capability_supported(const char *capability)
     return capability == NULL || strcmp(capability, PM_PROTOCOL_ID) == 0 ||
            strcmp(capability, "headless-command-v1") == 0 || strcmp(capability, "esp-idf-ota-v1") == 0 ||
            strcmp(capability, "storage-journal-v1") == 0 || strcmp(capability, "ota_v1") == 0 ||
-           strcmp(capability, "destructive_commands_v1") == 0;
+           strcmp(capability, "destructive_commands_v1") == 0 ||
+           strcmp(capability, "credential_rotation_v1") == 0;
 }
 
 static void notify_authenticated_result_acceptance(pm_network_context_t *context, const char *request_body)
@@ -988,10 +997,22 @@ static void notify_authenticated_result_acceptance(pm_network_context_t *context
     cJSON_Delete(root);
 }
 
+static void zeroize_rotation_secrets(cJSON *commands)
+{
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, commands) {
+        cJSON *payload = cJSON_GetObjectItemCaseSensitive(item, "payload");
+        cJSON *secret = cJSON_GetObjectItemCaseSensitive(payload, "device_secret_hex");
+        if (cJSON_IsString(secret) && secret->valuestring != NULL) {
+            secure_zero_memory(secret->valuestring, strlen(secret->valuestring));
+        }
+    }
+}
+
 static void parse_commands(pm_network_context_t *context, const char *response)
 {
     cJSON *root = cJSON_Parse(response);
-    const cJSON *commands = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "commands");
+    cJSON *commands = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "commands");
     if (!cJSON_IsArray(commands)) {
         cJSON_Delete(root);
         return;
@@ -1015,8 +1036,8 @@ static void parse_commands(pm_network_context_t *context, const char *response)
             !(cJSON_IsNull(capability) || cJSON_IsString(capability)) || !cJSON_IsObject(payload) ||
             !pm_command_type_from_name(type->valuestring, &command.type) ||
             !capability_supported(cJSON_IsString(capability) ? capability->valuestring : NULL) ||
-            !parse_rfc3339_ms(not_before->valuestring, &command.not_before_utc_ms) ||
-            !parse_rfc3339_ms(expires->valuestring, &command.expires_utc_ms) ||
+            !pm_network_parse_rfc3339_ms(not_before->valuestring, &command.not_before_utc_ms) ||
+            !pm_network_parse_rfc3339_ms(expires->valuestring, &command.expires_utc_ms) ||
             command.expires_utc_ms <= command.not_before_utc_ms) {
             continue;
         }
@@ -1026,21 +1047,26 @@ static void parse_commands(pm_network_context_t *context, const char *response)
         command.attempt = (uint8_t)attempt->valuedouble;
         char *serialized = cJSON_PrintUnformatted(payload);
         if (serialized == NULL || strlen(serialized) > PM_COMMAND_PAYLOAD_MAX) {
+            if (serialized != NULL) {
+                secure_zero_memory(serialized, strlen(serialized));
+            }
             cJSON_free(serialized);
             continue;
         }
         (void)snprintf(command.payload, sizeof(command.payload), "%s", serialized);
+        secure_zero_memory(serialized, strlen(serialized));
         cJSON_free(serialized);
-        if (command.issued_utc_ms < command.not_before_utc_ms) {
-            continue;
+        if (command.issued_utc_ms >= command.not_before_utc_ms) {
+            pm_command_t *stored = NULL;
+            bool duplicate = false;
+            if (pm_command_accept(context->commands, &command, command.issued_utc_ms, &stored, &duplicate) == ESP_OK &&
+                !duplicate && context->command_callback != NULL) {
+                context->command_callback(stored, context->command_context);
+            }
         }
-        pm_command_t *stored = NULL;
-        bool duplicate = false;
-        if (pm_command_accept(context->commands, &command, command.issued_utc_ms, &stored, &duplicate) == ESP_OK &&
-            !duplicate && context->command_callback != NULL) {
-            context->command_callback(stored, context->command_context);
-        }
+        secure_zero_memory(&command, sizeof(command));
     }
+    zeroize_rotation_secrets(commands);
     cJSON_Delete(root);
 }
 
@@ -1066,10 +1092,10 @@ static esp_err_t send_heartbeat(pm_network_context_t *context)
         const cJSON *server_time = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "server_time");
         const cJSON *ack = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "highest_contiguous_sequence");
         const cJSON *gaps = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "gaps");
-        const cJSON *commands = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "commands");
+        cJSON *commands = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "commands");
         int64_t server_utc_ms = 0;
         if (!cJSON_IsString(protocol) || strcmp(protocol->valuestring, PM_PROTOCOL_ID) != 0 ||
-            !cJSON_IsString(server_time) || !parse_rfc3339_ms(server_time->valuestring, &server_utc_ms) ||
+            !cJSON_IsString(server_time) || !pm_network_parse_rfc3339_ms(server_time->valuestring, &server_utc_ms) ||
             !cJSON_IsNumber(ack) || ack->valuedouble < 0.0 || !cJSON_IsArray(gaps) || !cJSON_IsArray(commands)) {
             error = ESP_ERR_INVALID_RESPONSE;
         } else {
@@ -1083,8 +1109,10 @@ static esp_err_t send_heartbeat(pm_network_context_t *context)
                 parse_commands(context, response);
             }
         }
+        zeroize_rotation_secrets(commands);
         cJSON_Delete(root);
     }
+    secure_zero_memory(response, sizeof(response));
     return error;
 }
 
@@ -1113,7 +1141,7 @@ static esp_err_t send_backlog(pm_network_context_t *context)
     const cJSON *gaps = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "gaps");
     int64_t server_utc_ms = 0;
     if (!cJSON_IsString(protocol) || strcmp(protocol->valuestring, PM_PROTOCOL_ID) != 0 ||
-        !cJSON_IsString(server_time) || !parse_rfc3339_ms(server_time->valuestring, &server_utc_ms) ||
+        !cJSON_IsString(server_time) || !pm_network_parse_rfc3339_ms(server_time->valuestring, &server_utc_ms) ||
         !cJSON_IsNumber(ack) || ack->valuedouble < 0.0 || !cJSON_IsArray(gaps)) {
         cJSON_Delete(root);
         return ESP_ERR_INVALID_RESPONSE;
@@ -1152,7 +1180,7 @@ static esp_err_t send_permanent_loss(pm_network_context_t *context)
     const cJSON *gaps = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "gaps");
     int64_t server_utc_ms = 0;
     if (!cJSON_IsString(protocol) || strcmp(protocol->valuestring, PM_PROTOCOL_ID) != 0 ||
-        !cJSON_IsString(server_time) || !parse_rfc3339_ms(server_time->valuestring, &server_utc_ms) ||
+        !cJSON_IsString(server_time) || !pm_network_parse_rfc3339_ms(server_time->valuestring, &server_utc_ms) ||
         !cJSON_IsNumber(accepted) || accepted->valuedouble < 0.0 || !cJSON_IsNumber(ack) ||
         ack->valuedouble < 0.0 || !cJSON_IsArray(gaps)) {
         cJSON_Delete(root);

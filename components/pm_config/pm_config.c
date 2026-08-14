@@ -162,6 +162,140 @@ esp_err_t pm_config_commit(pm_config_transaction_t *transaction)
     return error;
 }
 
+static const char *slot_key(char slot)
+{
+    return slot == 'A' ? PM_CONFIG_SLOT_A : slot == 'B' ? PM_CONFIG_SLOT_B : NULL;
+}
+
+esp_err_t pm_config_load_staged(char slot, uint32_t expected_generation, pm_config_t *config)
+{
+    const char *key = slot_key(slot);
+    if (key == NULL || expected_generation == 0U || config == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(PM_CONFIG_NAMESPACE, NVS_READONLY, &handle), "pm_config", "open");
+    esp_err_t error = read_slot(handle, key, config);
+    nvs_close(handle);
+    if (error == ESP_OK && config->generation != expected_generation) {
+        memset(config, 0, sizeof(*config));
+        return ESP_ERR_INVALID_STATE;
+    }
+    return error;
+}
+
+esp_err_t pm_config_activate_staged(char slot, uint32_t expected_generation)
+{
+    const char *key = slot_key(slot);
+    if (key == NULL || expected_generation == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(PM_CONFIG_NAMESPACE, NVS_READWRITE, &handle), "pm_config", "open");
+    pm_config_t candidate = {0};
+    esp_err_t error = read_slot(handle, key, &candidate);
+    if (error == ESP_OK && candidate.generation != expected_generation) {
+        error = ESP_ERR_INVALID_STATE;
+    }
+    uint8_t active = 0U;
+    if (error == ESP_OK) {
+        error = nvs_get_u8(handle, PM_CONFIG_ACTIVE, &active);
+    }
+    if (error == ESP_OK && active != (uint8_t)slot) {
+        error = nvs_set_u8(handle, PM_CONFIG_ACTIVE, (uint8_t)slot);
+        if (error == ESP_OK) {
+            error = nvs_commit(handle);
+        }
+    }
+    nvs_close(handle);
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+esp_err_t pm_config_discard_staged(char slot, uint32_t expected_generation)
+{
+    const char *key = slot_key(slot);
+    if (key == NULL || expected_generation == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(PM_CONFIG_NAMESPACE, NVS_READWRITE, &handle), "pm_config", "open");
+    uint8_t active = 0U;
+    esp_err_t error = nvs_get_u8(handle, PM_CONFIG_ACTIVE, &active);
+    pm_config_t candidate = {0};
+    if (error == ESP_OK && active == (uint8_t)slot) {
+        error = ESP_ERR_INVALID_STATE;
+    } else if (error == ESP_OK) {
+        error = read_slot(handle, key, &candidate);
+        if (error == ESP_ERR_NVS_NOT_FOUND) {
+            error = ESP_OK;
+        } else if (error == ESP_OK && candidate.generation != expected_generation) {
+            error = ESP_ERR_INVALID_STATE;
+        } else if (error == ESP_OK) {
+            error = nvs_erase_key(handle, key);
+            if (error == ESP_OK) {
+                error = nvs_commit(handle);
+            }
+        }
+    }
+    nvs_close(handle);
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+esp_err_t pm_config_discard_inactive_generation(uint32_t expected_generation)
+{
+    if (expected_generation == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(PM_CONFIG_NAMESPACE, NVS_READWRITE, &handle), "pm_config", "open");
+    uint8_t active = 0U;
+    esp_err_t error = nvs_get_u8(handle, PM_CONFIG_ACTIVE, &active);
+    if (error == ESP_OK && active != (uint8_t)'A' && active != (uint8_t)'B') {
+        error = ESP_ERR_INVALID_STATE;
+    }
+    const char *key = active == (uint8_t)'A' ? PM_CONFIG_SLOT_B : PM_CONFIG_SLOT_A;
+    pm_config_t candidate = {0};
+    if (error == ESP_OK) {
+        error = read_slot(handle, key, &candidate);
+        if (error == ESP_ERR_NVS_NOT_FOUND ||
+            (error == ESP_OK && candidate.generation != expected_generation)) {
+            error = ESP_OK;
+        } else if (error == ESP_OK) {
+            error = nvs_erase_key(handle, key);
+            if (error == ESP_OK) {
+                error = nvs_commit(handle);
+            }
+        }
+    }
+    nvs_close(handle);
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+esp_err_t pm_config_erase_inactive(void)
+{
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(PM_CONFIG_NAMESPACE, NVS_READWRITE, &handle), "pm_config", "open");
+    uint8_t active = 0U;
+    esp_err_t error = nvs_get_u8(handle, PM_CONFIG_ACTIVE, &active);
+    if (error == ESP_OK && active != (uint8_t)'A' && active != (uint8_t)'B') {
+        error = ESP_ERR_INVALID_STATE;
+    }
+    if (error == ESP_OK) {
+        error = nvs_erase_key(handle, active == (uint8_t)'A' ? PM_CONFIG_SLOT_B : PM_CONFIG_SLOT_A);
+        if (error == ESP_ERR_NVS_NOT_FOUND) {
+            error = ESP_OK;
+        }
+    }
+    if (error == ESP_OK) {
+        error = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return error;
+}
+
 void pm_config_abort(pm_config_transaction_t *transaction)
 {
     if (transaction != NULL) {
@@ -185,4 +319,3 @@ bool pm_config_secret_field_name(const char *name)
     }
     return false;
 }
-

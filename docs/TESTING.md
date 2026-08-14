@@ -6,9 +6,9 @@ Run all host evidence from the repository root:
 .\tools\Run-HostTests.ps1
 ```
 
-The runner executes Python unit/model tests, the named 36-case power/config/format/OTA/SD/PZEM/network/server/command fault matrix, and an accelerated 120-day integration. The integration covers 10,368,000 one-second samples, 172,800 durable intervals, randomized outages/restarts/corruption, backlog/ack, commands, OTA, and time trust. CI additionally compiles and runs 63 pure production C parser/aggregation/journal assertions with `-Wall -Wextra -Werror`, repeats them under ASan/UBSan, and builds the entire ESP-IDF image.
+The runner executes 55 Python unit/model tests, the named 36-case power/config/format/OTA/SD/PZEM/network/server/command fault matrix, and an accelerated 120-day integration. The integration covers 10,368,000 one-second samples, 172,800 durable intervals, randomized outages/restarts/corruption, backlog/ack, commands, OTA, and time trust. CI additionally compiles and runs 63 pure production C parser/aggregation/journal assertions with `-Wall -Wextra -Werror`, repeats them under ASan/UBSan, and builds the entire ESP-IDF image.
 
-Assertions include PZEM request/CRC/ranges; energy reset/rollover; missing-vs-zero; deterministic record/CRC; trailing recovery/index/retention; A/B config and sequence reservation; ack monotonicity/card replacement; state/backoff/heartbeat priority; TLS classification; HMAC canonicalization/HKDF/replay; command expiry/idempotency/prepare; OTA hash/compatibility/rollback; COM transaction/redaction; no old-data replay; and no deadlock/permanent latch.
+Assertions include PZEM request/CRC/ranges; energy reset/rollover; missing-vs-zero; deterministic record/CRC; trailing recovery/index/retention; A/B config and sequence reservation; ack monotonicity/card replacement; state/backoff/heartbeat priority; TLS classification; HMAC canonicalization/HKDF/replay; command expiry/idempotency/prepare; credential-rotation crashes at every durable boundary, old/new key transition, expiry/cancel/zeroization; OTA hash/compatibility/rollback; COM transaction/redaction; no old-data replay; and no deadlock/permanent latch.
 
 Physical HIL requires an isolated fixture, actual marked unit, Python dependencies in `test/hardware/requirements.txt`, a controller token supplied only as `PM_HIL_FIXTURE_TOKEN`, and at least 72 hours:
 

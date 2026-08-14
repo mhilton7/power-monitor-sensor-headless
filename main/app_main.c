@@ -48,6 +48,13 @@
 #define PM_PREPARE_LEGACY_KEY "active"
 #define PM_PREPARE_SCHEMA 2U
 #define PM_PREPARE_EXPIRY_US UINT64_C(600000000)
+#define PM_ROTATION_NAMESPACE "pm_rotation"
+#define PM_ROTATION_SLOT_A "slot_a"
+#define PM_ROTATION_SLOT_B "slot_b"
+#define PM_ROTATION_SCHEMA_VERSION 1U
+#define PM_ROTATION_CONTRACT "pm-credential-rotation/1.0.0"
+#define PM_NVS_RAW_DURABLE_BLOB_BUDGET UINT32_C(0xD000)
+#define PM_NVS_OTHER_DURABLE_RESERVE UINT32_C(4096)
 
 #ifdef CONFIG_PM_HARDWARE_IDENTITY_VERIFIED
 #define PM_BUILD_HARDWARE_VERIFIED true
@@ -95,9 +102,6 @@ static struct {
     bool prepared;
     pm_format_transaction_t storage_format;
 } s_reset;
-static pm_config_t s_credential_candidate;
-static pm_config_transaction_t s_credential_transaction;
-static bool s_credential_prepared;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t s_prepare_boot_session[16];
 
@@ -138,6 +142,41 @@ typedef struct {
 } pm_prepare_record_t;
 
 static pm_prepare_record_t s_prepare_record;
+
+typedef enum {
+    PM_ROTATION_PHASE_NONE = 0,
+    PM_ROTATION_PHASE_CANDIDATE_PERSISTED = 1,
+    PM_ROTATION_PHASE_CONFIG_STAGED = 2,
+    PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED = 3,
+    PM_ROTATION_PHASE_CONFIG_ACTIVATED = 4,
+    PM_ROTATION_PHASE_COMMAND_RESULT_DURABLE = 5,
+    PM_ROTATION_PHASE_RESULT_ACKNOWLEDGED = 6,
+} pm_rotation_phase_t;
+
+typedef struct {
+    uint32_t schema_version;
+    uint32_t journal_generation;
+    uint8_t phase;
+    uint8_t reserved[3];
+    char rotation_id[PM_COMMAND_ID_MAX + 1U];
+    char prepare_command_id[PM_COMMAND_ID_MAX + 1U];
+    char commit_command_id[PM_COMMAND_ID_MAX + 1U];
+    char credential_fingerprint[PM_SHA256_HEX_SIZE + 1U];
+    uint8_t candidate_secret[PM_CONFIG_SECRET_MAX];
+    int64_t overlap_expires_utc_ms;
+    uint32_t candidate_config_generation;
+    char candidate_slot;
+    uint8_t reserved_tail[3];
+    uint32_t crc32;
+} pm_rotation_record_t;
+
+static pm_rotation_record_t s_rotation_record;
+static bool s_rotation_payload_redaction_retry;
+
+_Static_assert((2U * sizeof(pm_command_ledger_t)) + (2U * sizeof(pm_config_t)) +
+                   (2U * sizeof(pm_prepare_record_t)) + (2U * sizeof(pm_rotation_record_t)) +
+                   PM_NVS_OTHER_DURABLE_RESERVE <= PM_NVS_RAW_DURABLE_BLOB_BUDGET,
+               "A/B durable records exceed the conservative NVS payload budget");
 
 static uint32_t prepare_record_crc(const pm_prepare_record_t *record)
 {
@@ -202,6 +241,9 @@ static esp_err_t prepare_state_load(void)
 {
     nvs_handle_t handle = 0;
     esp_err_t error = nvs_open(PM_PREPARE_NAMESPACE, NVS_READONLY, &handle);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_ERR_NOT_FOUND;
+    }
     if (error != ESP_OK) {
         return error;
     }
@@ -555,6 +597,450 @@ static pm_command_t *find_command_by_id(const char *command_id)
     return NULL;
 }
 
+static uint32_t rotation_record_crc(const pm_rotation_record_t *record)
+{
+    return pm_crc32_ieee(record, offsetof(pm_rotation_record_t, crc32));
+}
+
+static bool lowercase_hex_text(const char *value, size_t length)
+{
+    if (value == NULL || strlen(value) != length) {
+        return false;
+    }
+    for (size_t i = 0U; i < length; ++i) {
+        if (!isdigit((unsigned char)value[i]) && (value[i] < 'a' || value[i] > 'f')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool canonical_uuid_text(const char *value)
+{
+    if (value == NULL || strlen(value) != PM_COMMAND_ID_MAX) {
+        return false;
+    }
+    for (size_t i = 0U; i < PM_COMMAND_ID_MAX; ++i) {
+        if (i == 8U || i == 13U || i == 18U || i == 23U) {
+            if (value[i] != '-') {
+                return false;
+            }
+        } else if (!isdigit((unsigned char)value[i]) && (value[i] < 'a' || value[i] > 'f')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool rotation_record_valid(const pm_rotation_record_t *record)
+{
+    if (record == NULL || record->schema_version != PM_ROTATION_SCHEMA_VERSION ||
+        record->journal_generation == 0U ||
+        record->phase < PM_ROTATION_PHASE_CANDIDATE_PERSISTED ||
+        record->phase > PM_ROTATION_PHASE_RESULT_ACKNOWLEDGED ||
+        !canonical_uuid_text(record->rotation_id) ||
+        !canonical_uuid_text(record->prepare_command_id) ||
+        !lowercase_hex_text(record->credential_fingerprint, PM_SHA256_HEX_SIZE) ||
+        record->overlap_expires_utc_ms < INT64_C(1704067200000) ||
+        record->candidate_config_generation == 0U ||
+        record->crc32 != rotation_record_crc(record)) {
+        return false;
+    }
+    if (record->phase == PM_ROTATION_PHASE_CANDIDATE_PERSISTED) {
+        return record->commit_command_id[0] == '\0' && record->candidate_slot == '\0' &&
+               !bytes_are_zero(record->candidate_secret, sizeof(record->candidate_secret));
+    }
+    if (record->candidate_slot != 'A' && record->candidate_slot != 'B') {
+        return false;
+    }
+    if (record->phase == PM_ROTATION_PHASE_CONFIG_STAGED) {
+        return record->commit_command_id[0] == '\0' &&
+               !bytes_are_zero(record->candidate_secret, sizeof(record->candidate_secret));
+    }
+    return canonical_uuid_text(record->commit_command_id) &&
+           bytes_are_zero(record->candidate_secret, sizeof(record->candidate_secret));
+}
+
+static esp_err_t rotation_read_slot(nvs_handle_t handle, const char *key, pm_rotation_record_t *record,
+                                    bool *present)
+{
+    size_t size = sizeof(*record);
+    const esp_err_t error = nvs_get_blob(handle, key, record, &size);
+    *present = error != ESP_ERR_NVS_NOT_FOUND;
+    if (error != ESP_OK) {
+        return error;
+    }
+    return size == sizeof(*record) && rotation_record_valid(record) ? ESP_OK : ESP_ERR_INVALID_CRC;
+}
+
+static esp_err_t rotation_state_load(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(PM_ROTATION_NAMESPACE, NVS_READONLY, &handle);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (error != ESP_OK) {
+        return error;
+    }
+    pm_rotation_record_t a = {0};
+    pm_rotation_record_t b = {0};
+    bool present_a = false;
+    bool present_b = false;
+    const bool valid_a = rotation_read_slot(handle, PM_ROTATION_SLOT_A, &a, &present_a) == ESP_OK;
+    const bool valid_b = rotation_read_slot(handle, PM_ROTATION_SLOT_B, &b, &present_b) == ESP_OK;
+    nvs_close(handle);
+    if (!valid_a && !valid_b) {
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        return present_a || present_b ? ESP_ERR_INVALID_CRC : ESP_ERR_NOT_FOUND;
+    }
+    s_rotation_record = valid_a && (!valid_b || a.journal_generation >= b.journal_generation) ? a : b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    return ESP_OK;
+}
+
+static esp_err_t rotation_state_persist(const pm_rotation_record_t *candidate)
+{
+    if (candidate == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    pm_rotation_record_t record = *candidate;
+    record.schema_version = PM_ROTATION_SCHEMA_VERSION;
+    record.journal_generation = s_rotation_record.journal_generation + 1U;
+    if (record.journal_generation == 0U) {
+        memset(&record, 0, sizeof(record));
+        return ESP_ERR_INVALID_SIZE;
+    }
+    record.crc32 = rotation_record_crc(&record);
+    if (!rotation_record_valid(&record)) {
+        memset(&record, 0, sizeof(record));
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(PM_ROTATION_NAMESPACE, NVS_READWRITE, &handle);
+    const char *key = (record.journal_generation & 1U) != 0U ? PM_ROTATION_SLOT_A : PM_ROTATION_SLOT_B;
+    if (error == ESP_OK) {
+        error = nvs_set_blob(handle, key, &record, sizeof(record));
+    }
+    if (error == ESP_OK) {
+        error = nvs_commit(handle);
+    }
+    pm_rotation_record_t verified = {0};
+    bool present = false;
+    if (error == ESP_OK) {
+        error = rotation_read_slot(handle, key, &verified, &present);
+        if (error == ESP_OK && memcmp(&record, &verified, sizeof(record)) != 0) {
+            error = ESP_FAIL;
+        }
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+    if (error == ESP_OK) {
+        s_rotation_record = record;
+    }
+    memset(&record, 0, sizeof(record));
+    memset(&verified, 0, sizeof(verified));
+    return error;
+}
+
+static esp_err_t rotation_state_erase_persisted(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(PM_ROTATION_NAMESPACE, NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        const char *const keys[] = {PM_ROTATION_SLOT_A, PM_ROTATION_SLOT_B};
+        for (size_t i = 0U; i < sizeof(keys) / sizeof(keys[0]) && error == ESP_OK; ++i) {
+            error = nvs_erase_key(handle, keys[i]);
+            if (error == ESP_ERR_NVS_NOT_FOUND) {
+                error = ESP_OK;
+            }
+        }
+    }
+    if (error == ESP_OK) {
+        error = nvs_commit(handle);
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+    return error;
+}
+
+static esp_err_t rotation_clear_prepared(void)
+{
+    if (s_rotation_record.phase >= PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t error = ESP_OK;
+    if (s_rotation_record.phase == PM_ROTATION_PHASE_CANDIDATE_PERSISTED) {
+        error = pm_config_discard_inactive_generation(s_rotation_record.candidate_config_generation);
+    } else if (s_rotation_record.phase == PM_ROTATION_PHASE_CONFIG_STAGED) {
+        error = pm_config_discard_staged(s_rotation_record.candidate_slot,
+                                         s_rotation_record.candidate_config_generation);
+    }
+    if (error == ESP_OK) {
+        error = rotation_state_erase_persisted();
+    }
+    if (error == ESP_OK) {
+        memset(&s_rotation_record, 0, sizeof(s_rotation_record));
+    } else {
+        /* Keep the transaction identity and phase fail-closed so a later
+         * control-loop pass (or reboot from the valid journal slot) retries
+         * cleanup.  Dropping the phase here could admit a second rotation
+         * while an inactive candidate still exists. */
+        return error;
+    }
+    return error;
+}
+
+static esp_err_t rotation_persist_phase(pm_rotation_phase_t phase)
+{
+    pm_rotation_record_t candidate = s_rotation_record;
+    candidate.phase = (uint8_t)phase;
+    const esp_err_t error = rotation_state_persist(&candidate);
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+static bool rotation_fingerprint_matches(const uint8_t secret[PM_CONFIG_SECRET_MAX],
+                                         const char expected[PM_SHA256_HEX_SIZE + 1U])
+{
+    uint8_t digest[PM_SHA256_SIZE] = {0};
+    char fingerprint[PM_SHA256_HEX_SIZE + 1U] = {0};
+    pm_sha256(secret, PM_CONFIG_SECRET_MAX, digest);
+    pm_hex_lower(digest, sizeof(digest), fingerprint, sizeof(fingerprint));
+    const bool matches = pm_constant_time_equal((const uint8_t *)fingerprint,
+                                                (const uint8_t *)expected,
+                                                PM_SHA256_HEX_SIZE);
+    memset(digest, 0, sizeof(digest));
+    memset(fingerprint, 0, sizeof(fingerprint));
+    return matches;
+}
+
+static esp_err_t rotation_stage_candidate(void)
+{
+    if (s_rotation_record.phase != PM_ROTATION_PHASE_CANDIDATE_PERSISTED ||
+        s_config.generation + 1U != s_rotation_record.candidate_config_generation ||
+        s_rotation_record.candidate_config_generation == 0U) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pm_config_t candidate = s_config;
+    candidate.generation = s_rotation_record.candidate_config_generation;
+    memcpy(candidate.device_secret, s_rotation_record.candidate_secret,
+           sizeof(candidate.device_secret));
+    candidate.device_secret_len = PM_CONFIG_SECRET_MAX;
+    pm_config_transaction_t transaction = {0};
+    esp_err_t error = pm_config_begin(&candidate, &transaction);
+    if (error == ESP_OK) {
+        pm_rotation_record_t record = s_rotation_record;
+        record.phase = PM_ROTATION_PHASE_CONFIG_STAGED;
+        record.candidate_slot = transaction.candidate_slot;
+        error = rotation_state_persist(&record);
+        memset(&record, 0, sizeof(record));
+    }
+    pm_config_abort(&transaction);
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+static esp_err_t rotation_persist_prepare_result(void)
+{
+    pm_command_t *command = find_command_by_id(s_rotation_record.prepare_command_id);
+    if (command == NULL || command->type != PM_COMMAND_ROTATE_DEVICE_CREDENTIALS) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (command->state == PM_COMMAND_SUCCEEDED) {
+        return ESP_OK;
+    }
+    if (command->state != PM_COMMAND_RUNNING && command->state != PM_COMMAND_ACCEPTED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                   "{\"rotation_id\":\"%s\",\"credential_fingerprint\":\"%s\",\"ready\":true}",
+                   s_rotation_record.rotation_id, s_rotation_record.credential_fingerprint);
+    (void)snprintf(command->result_text, sizeof(command->result_text), "credential_rotation_prepared");
+    return pm_command_transition(&s_commands, command, PM_COMMAND_SUCCEEDED, 100U, ESP_OK);
+}
+
+static esp_err_t rotation_activate_candidate(void)
+{
+    if (s_rotation_record.phase != PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pm_config_t candidate = {0};
+    esp_err_t error = pm_config_load_staged(s_rotation_record.candidate_slot,
+                                            s_rotation_record.candidate_config_generation,
+                                            &candidate);
+    if (error == ESP_OK &&
+        (candidate.device_secret_len != PM_CONFIG_SECRET_MAX ||
+         !rotation_fingerprint_matches(candidate.device_secret,
+                                       s_rotation_record.credential_fingerprint))) {
+        error = ESP_ERR_INVALID_CRC;
+    }
+    if (error == ESP_OK) {
+        error = pm_config_activate_staged(s_rotation_record.candidate_slot,
+                                          s_rotation_record.candidate_config_generation);
+    }
+    if (error == ESP_OK) {
+        pm_config_t activated = {0};
+        error = pm_config_load(&activated);
+        if (error == ESP_OK &&
+            (activated.generation != s_rotation_record.candidate_config_generation ||
+             activated.device_secret_len != PM_CONFIG_SECRET_MAX ||
+             !rotation_fingerprint_matches(activated.device_secret,
+                                           s_rotation_record.credential_fingerprint))) {
+            error = ESP_ERR_INVALID_CRC;
+        }
+        if (error == ESP_OK) {
+            s_config = activated;
+            s_network.config = activated;
+            uuid_text(s_config.device_id, s_network.device_id_text);
+            error = pm_hkdf_directional_keys(s_config.device_secret, s_config.device_secret_len,
+                                              s_network.device_id_text,
+                                              s_network.device_to_server_key,
+                                              s_network.server_to_device_key);
+        }
+        memset(&activated, 0, sizeof(activated));
+    }
+    if (error == ESP_OK) {
+        error = rotation_persist_phase(PM_ROTATION_PHASE_CONFIG_ACTIVATED);
+    }
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+static esp_err_t rotation_persist_commit_result(void)
+{
+    pm_command_t *command = find_command_by_id(s_rotation_record.commit_command_id);
+    if (command == NULL || command->type != PM_COMMAND_ROTATE_DEVICE_CREDENTIALS) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (command->state != PM_COMMAND_SUCCEEDED) {
+        if (command->state != PM_COMMAND_RUNNING && command->state != PM_COMMAND_ACCEPTED) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                       "{\"rotation_id\":\"%s\",\"credential_fingerprint\":\"%s\",\"activated\":true}",
+                       s_rotation_record.rotation_id, s_rotation_record.credential_fingerprint);
+        (void)snprintf(command->result_text, sizeof(command->result_text), "credential_rotation_activated");
+        command->result_ack_required = true;
+        const esp_err_t error = pm_command_transition(&s_commands, command, PM_COMMAND_SUCCEEDED, 100U, ESP_OK);
+        if (error != ESP_OK) {
+            return error;
+        }
+    }
+    return rotation_persist_phase(PM_ROTATION_PHASE_COMMAND_RESULT_DURABLE);
+}
+
+static esp_err_t resume_rotation_transaction(void)
+{
+    esp_err_t error = ESP_OK;
+    if (s_rotation_record.phase >= PM_ROTATION_PHASE_CANDIDATE_PERSISTED &&
+        s_rotation_record.phase <= PM_ROTATION_PHASE_CONFIG_STAGED) {
+        int64_t now_utc_ms = 0;
+        if (!pm_time_now(&s_time, esp_timer_get_time(), &now_utc_ms) ||
+            now_utc_ms > s_rotation_record.overlap_expires_utc_ms) {
+            /* A rebooted prepare is dormant until UTC is trustworthy.  An
+             * expired candidate is handled by rotation_expire_if_needed;
+             * neither condition is authorization to progress the journal. */
+            return ESP_OK;
+        }
+        pm_command_t *prepare = find_command_by_id(s_rotation_record.prepare_command_id);
+        if (prepare == NULL) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        if (!prepare->payload_redacted || s_rotation_payload_redaction_retry) {
+            error = pm_command_zeroize_payload(&s_commands, prepare);
+            s_rotation_payload_redaction_retry = error != ESP_OK;
+        }
+    }
+    if (error == ESP_OK && s_rotation_record.phase == PM_ROTATION_PHASE_CANDIDATE_PERSISTED) {
+        error = rotation_stage_candidate();
+    }
+    if (error == ESP_OK && s_rotation_record.phase == PM_ROTATION_PHASE_CONFIG_STAGED) {
+        error = rotation_persist_prepare_result();
+    }
+    if (error == ESP_OK && s_rotation_record.phase == PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED) {
+        error = rotation_activate_candidate();
+    }
+    if (error == ESP_OK && s_rotation_record.phase == PM_ROTATION_PHASE_CONFIG_ACTIVATED) {
+        error = rotation_persist_commit_result();
+    }
+    return error;
+}
+
+static esp_err_t rotation_state_boot_load(void)
+{
+    memset(&s_rotation_record, 0, sizeof(s_rotation_record));
+    const esp_err_t error = rotation_state_load();
+    if (error == ESP_ERR_NOT_FOUND) {
+        return rotation_state_erase_persisted();
+    }
+    return error;
+}
+
+static esp_err_t rotation_expire_if_needed(void)
+{
+    if (s_rotation_record.phase < PM_ROTATION_PHASE_CANDIDATE_PERSISTED ||
+        s_rotation_record.phase >= PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED) {
+        return ESP_OK;
+    }
+    int64_t now_utc_ms = 0;
+    if (!pm_time_now(&s_time, esp_timer_get_time(), &now_utc_ms)) {
+        return ESP_OK;
+    }
+    if (now_utc_ms > s_rotation_record.overlap_expires_utc_ms) {
+        const esp_err_t error = rotation_clear_prepared();
+        if (error != ESP_OK) {
+            ESP_LOGE(TAG, "expired credential candidate zeroization failed closed");
+        } else {
+            ESP_LOGI(TAG, "expired credential candidate was zeroized and erased");
+        }
+        return error;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t rotation_cleanup_acknowledged(void)
+{
+    if (s_rotation_record.phase != PM_ROTATION_PHASE_RESULT_ACKNOWLEDGED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t error = pm_command_acknowledge_result(&s_commands, s_rotation_record.commit_command_id);
+    if (error == ESP_ERR_NOT_FOUND) {
+        /* RESULT_ACKNOWLEDGED is itself durable.  The now-unpinned ledger
+         * entry may have been reused after a prior partial cleanup. */
+        error = ESP_OK;
+    }
+    if (error == ESP_OK) {
+        error = pm_config_erase_inactive();
+    }
+    if (error == ESP_OK) {
+        error = rotation_state_erase_persisted();
+    }
+    if (error == ESP_OK) {
+        memset(&s_rotation_record, 0, sizeof(s_rotation_record));
+    }
+    return error;
+}
+
+static esp_err_t destructive_cleanup_acknowledged(void)
+{
+    if (s_prepare_record.phase != PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t error = pm_command_acknowledge_result(&s_commands, s_prepare_record.commit_command_id);
+    if (error == ESP_ERR_NOT_FOUND) {
+        error = ESP_OK;
+    }
+    if (error == ESP_OK) {
+        error = prepare_state_clear();
+    }
+    return error;
+}
+
 static esp_err_t persist_prepare_phase(pm_prepare_phase_t phase)
 {
     pm_prepare_record_t candidate = s_prepare_record;
@@ -648,6 +1134,7 @@ static esp_err_t persist_destructive_command_result(pm_prepare_record_t *record,
                        (unsigned long long)record->internal_sequence_floor);
         (void)snprintf(command->result_text, sizeof(command->result_text), "data_reset_committed");
     }
+    command->result_ack_required = true;
     return pm_command_transition(&s_commands, command, PM_COMMAND_SUCCEEDED, 100U, ESP_OK);
 }
 
@@ -713,12 +1200,161 @@ static void process_authenticated_result_acknowledgements(void)
         if (s_prepare_record.phase == PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE &&
             strcmp(acknowledged.command_id, s_prepare_record.commit_command_id) == 0) {
             if (persist_prepare_phase(PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED) != ESP_OK ||
-                prepare_state_clear() != ESP_OK) {
+                destructive_cleanup_acknowledged() != ESP_OK) {
                 ESP_LOGE(TAG, "authenticated destructive result acknowledgement persistence failed");
+            }
+        }
+        if (s_rotation_record.phase == PM_ROTATION_PHASE_COMMAND_RESULT_DURABLE &&
+            strcmp(acknowledged.command_id, s_rotation_record.commit_command_id) == 0) {
+            if (rotation_persist_phase(PM_ROTATION_PHASE_RESULT_ACKNOWLEDGED) != ESP_OK ||
+                rotation_cleanup_acknowledged() != ESP_OK) {
+                ESP_LOGE(TAG, "authenticated credential-rotation result acknowledgement cleanup failed");
             }
         }
         memset(&acknowledged, 0, sizeof(acknowledged));
     }
+}
+
+static esp_err_t credential_rotation_prepare(pm_command_t *command, const cJSON *root,
+                                             bool *durable_completion_pending)
+{
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    const cJSON *rotation_id = cJSON_GetObjectItemCaseSensitive(root, "rotation_id");
+    const cJSON *secret = cJSON_GetObjectItemCaseSensitive(root, "device_secret_hex");
+    const cJSON *fingerprint = cJSON_GetObjectItemCaseSensitive(root, "credential_fingerprint");
+    const cJSON *overlap = cJSON_GetObjectItemCaseSensitive(root, "overlap_expires_at");
+    uint8_t decoded[PM_CONFIG_SECRET_MAX] = {0};
+    int64_t overlap_expires_utc_ms = 0;
+    int64_t now_utc_ms = 0;
+    esp_err_t result = ESP_OK;
+    if (cJSON_GetArraySize(root) != 5 || !cJSON_IsString(schema) ||
+        strcmp(schema->valuestring, PM_ROTATION_CONTRACT) != 0 ||
+        !cJSON_IsString(rotation_id) || !canonical_uuid_text(rotation_id->valuestring) ||
+        !cJSON_IsString(secret) || !lowercase_hex_text(secret->valuestring, PM_SHA256_HEX_SIZE) ||
+        !cJSON_IsString(fingerprint) ||
+        !lowercase_hex_text(fingerprint->valuestring, PM_SHA256_HEX_SIZE) ||
+        !cJSON_IsString(overlap) ||
+        !pm_network_parse_rfc3339_ms(overlap->valuestring, &overlap_expires_utc_ms)) {
+        result = ESP_ERR_INVALID_ARG;
+    } else if (!pm_time_now(&s_time, esp_timer_get_time(), &now_utc_ms)) {
+        result = ESP_ERR_INVALID_STATE;
+    } else if (now_utc_ms > command->expires_utc_ms || overlap_expires_utc_ms <= now_utc_ms) {
+        result = ESP_ERR_TIMEOUT;
+    } else if (s_rotation_record.phase != PM_ROTATION_PHASE_NONE ||
+               s_prepare_record.phase != PM_PREPARE_PHASE_NONE ||
+               s_config.generation == UINT32_MAX) {
+        result = ESP_ERR_INVALID_STATE;
+    } else if (!hex_decode(secret->valuestring, decoded, sizeof(decoded)) ||
+               !rotation_fingerprint_matches(decoded, fingerprint->valuestring)) {
+        result = ESP_ERR_INVALID_CRC;
+    } else {
+        pm_rotation_record_t record = {
+            .schema_version = PM_ROTATION_SCHEMA_VERSION,
+            .phase = PM_ROTATION_PHASE_CANDIDATE_PERSISTED,
+            .overlap_expires_utc_ms = overlap_expires_utc_ms,
+            .candidate_config_generation = s_config.generation + 1U,
+        };
+        (void)snprintf(record.rotation_id, sizeof(record.rotation_id), "%s", rotation_id->valuestring);
+        (void)snprintf(record.prepare_command_id, sizeof(record.prepare_command_id), "%s", command->command_id);
+        (void)snprintf(record.credential_fingerprint, sizeof(record.credential_fingerprint), "%s",
+                       fingerprint->valuestring);
+        memcpy(record.candidate_secret, decoded, sizeof(record.candidate_secret));
+        result = rotation_state_persist(&record);
+        memset(&record, 0, sizeof(record));
+        if (result == ESP_OK) {
+            result = resume_rotation_transaction();
+            *durable_completion_pending = result != ESP_OK;
+        }
+    }
+    memset(decoded, 0, sizeof(decoded));
+    return result;
+}
+
+static esp_err_t credential_rotation_commit(pm_command_t *command, const cJSON *root,
+                                            bool *durable_completion_pending)
+{
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    const cJSON *rotation_id = cJSON_GetObjectItemCaseSensitive(root, "rotation_id");
+    const cJSON *fingerprint = cJSON_GetObjectItemCaseSensitive(root, "credential_fingerprint");
+    int64_t now_utc_ms = 0;
+    if (cJSON_GetArraySize(root) != 3 || !cJSON_IsString(schema) ||
+        strcmp(schema->valuestring, PM_ROTATION_CONTRACT) != 0 ||
+        !cJSON_IsString(rotation_id) || !canonical_uuid_text(rotation_id->valuestring) ||
+        !cJSON_IsString(fingerprint) ||
+        !lowercase_hex_text(fingerprint->valuestring, PM_SHA256_HEX_SIZE)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!pm_time_now(&s_time, esp_timer_get_time(), &now_utc_ms)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (now_utc_ms > command->expires_utc_ms || now_utc_ms > s_rotation_record.overlap_expires_utc_ms) {
+        if (s_rotation_record.phase > PM_ROTATION_PHASE_NONE &&
+            s_rotation_record.phase < PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED) {
+            (void)rotation_clear_prepared();
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_rotation_record.phase != PM_ROTATION_PHASE_CONFIG_STAGED ||
+        !pm_constant_time_equal((const uint8_t *)rotation_id->valuestring,
+                                (const uint8_t *)s_rotation_record.rotation_id,
+                                PM_COMMAND_ID_MAX) ||
+        !pm_constant_time_equal((const uint8_t *)fingerprint->valuestring,
+                                (const uint8_t *)s_rotation_record.credential_fingerprint,
+                                PM_SHA256_HEX_SIZE)) {
+        return ESP_ERR_INVALID_CRC;
+    }
+    pm_config_t staged = {0};
+    esp_err_t result = pm_config_load_staged(s_rotation_record.candidate_slot,
+                                             s_rotation_record.candidate_config_generation,
+                                             &staged);
+    if (result == ESP_OK &&
+        (staged.device_secret_len != PM_CONFIG_SECRET_MAX ||
+         !rotation_fingerprint_matches(staged.device_secret,
+                                       s_rotation_record.credential_fingerprint))) {
+        result = ESP_ERR_INVALID_CRC;
+    }
+    memset(&staged, 0, sizeof(staged));
+    if (result != ESP_OK) {
+        return result;
+    }
+    pm_rotation_record_t intent = s_rotation_record;
+    intent.phase = PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED;
+    (void)snprintf(intent.commit_command_id, sizeof(intent.commit_command_id), "%s", command->command_id);
+    memset(intent.candidate_secret, 0, sizeof(intent.candidate_secret));
+    result = rotation_state_persist(&intent);
+    memset(&intent, 0, sizeof(intent));
+    if (result == ESP_OK) {
+        result = resume_rotation_transaction();
+        *durable_completion_pending = result != ESP_OK;
+    }
+    return result;
+}
+
+static esp_err_t credential_rotation_cancel(pm_command_t *command, const cJSON *root)
+{
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    const cJSON *rotation_id = cJSON_GetObjectItemCaseSensitive(root, "rotation_id");
+    const cJSON *cancelled = cJSON_GetObjectItemCaseSensitive(root, "cancelled");
+    if (cJSON_GetArraySize(root) != 3 || !cJSON_IsString(schema) ||
+        strcmp(schema->valuestring, PM_ROTATION_CONTRACT) != 0 ||
+        !cJSON_IsString(rotation_id) || !canonical_uuid_text(rotation_id->valuestring) ||
+        !cJSON_IsTrue(cancelled)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_rotation_record.phase < PM_ROTATION_PHASE_CANDIDATE_PERSISTED ||
+        s_rotation_record.phase >= PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED ||
+        !pm_constant_time_equal((const uint8_t *)rotation_id->valuestring,
+                                (const uint8_t *)s_rotation_record.rotation_id,
+                                PM_COMMAND_ID_MAX)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t result = rotation_clear_prepared();
+    if (result == ESP_OK) {
+        (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                       "{\"rotation_id\":\"%s\",\"cancelled\":true}", rotation_id->valuestring);
+        (void)snprintf(command->result_text, sizeof(command->result_text), "credential_rotation_cancelled");
+    }
+    return result;
 }
 
 static void ota_progress(uint8_t percent, pm_ota_stage_t stage, void *context)
@@ -818,7 +1454,8 @@ static void execute_command(pm_command_t *command)
         uint64_t acknowledged_lost = 0U;
         uint64_t unacknowledged_lost = 0U;
         const bool durable_transaction_active =
-            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED ||
+            s_rotation_record.phase != PM_ROTATION_PHASE_NONE;
         const esp_err_t clear_error = durable_transaction_active ? ESP_ERR_INVALID_STATE : prepare_state_clear();
         if (root == NULL || cJSON_GetArraySize(root) != 1 || !cJSON_IsString(token) ||
             !hex_decode(token->valuestring, decoded, sizeof(decoded))) {
@@ -946,7 +1583,8 @@ static void execute_command(pm_command_t *command)
         uint64_t internal_floor = 0U;
         uint8_t decoded[16] = {0};
         const bool durable_transaction_active =
-            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED ||
+            s_rotation_record.phase != PM_ROTATION_PHASE_NONE;
         const esp_err_t clear_error = durable_transaction_active ? ESP_ERR_INVALID_STATE : prepare_state_clear();
         if (root == NULL || cJSON_GetArraySize(root) != 3 || !cJSON_IsString(token) ||
             !hex_decode(token->valuestring, decoded, sizeof(decoded)) ||
@@ -1131,7 +1769,9 @@ static void execute_command(pm_command_t *command)
         const cJSON *name = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "friendly_name");
         const cJSON *timezone = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "timezone");
         const cJSON *ct = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "ct_rating_a");
-        if (!cJSON_IsString(name) || strlen(name->valuestring) > PM_CONFIG_NAME_MAX || !cJSON_IsString(timezone) ||
+        if (s_rotation_record.phase != PM_ROTATION_PHASE_NONE) {
+            result = ESP_ERR_INVALID_STATE;
+        } else if (!cJSON_IsString(name) || strlen(name->valuestring) > PM_CONFIG_NAME_MAX || !cJSON_IsString(timezone) ||
             strlen(timezone->valuestring) > PM_CONFIG_TIMEZONE_MAX || !cJSON_IsNumber(ct) || ct->valuedouble < 1.0 ||
             ct->valuedouble > 100.0 || cJSON_GetArraySize(root) != 3) {
             result = ESP_ERR_INVALID_ARG;
@@ -1157,50 +1797,17 @@ static void execute_command(pm_command_t *command)
     }
     case PM_COMMAND_ROTATE_DEVICE_CREDENTIALS: {
         cJSON *root = cJSON_Parse(command->payload);
-        const cJSON *action = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "action");
-        const cJSON *secret = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "device_secret_hex");
-        const cJSON *fingerprint_item = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "fingerprint");
-        if (cJSON_IsString(action) && strcmp(action->valuestring, "prepare") == 0 && cJSON_IsString(secret) &&
-            strlen(secret->valuestring) == 64U) {
-            s_credential_candidate = s_config;
-            s_credential_candidate.generation++;
-            if (!hex_decode(secret->valuestring, s_credential_candidate.device_secret, 32U)) {
-                result = ESP_ERR_INVALID_ARG;
-            } else {
-                s_credential_candidate.device_secret_len = 32U;
-                result = pm_config_begin(&s_credential_candidate, &s_credential_transaction);
-                s_credential_prepared = result == ESP_OK;
-                uint8_t digest[32];
-                char fingerprint[17];
-                pm_sha256(s_credential_candidate.device_secret, 32U, digest);
-                pm_hex_lower(digest, 8U, fingerprint, sizeof(fingerprint));
-                (void)snprintf(command->result_text, sizeof(command->result_text), "prepared_fingerprint=%s", fingerprint);
-            }
-        } else if (cJSON_IsString(action) && strcmp(action->valuestring, "commit") == 0 &&
-                   cJSON_IsString(fingerprint_item) && s_credential_prepared) {
-            uint8_t digest[32];
-            char fingerprint[17];
-            pm_sha256(s_credential_candidate.device_secret, 32U, digest);
-            pm_hex_lower(digest, 8U, fingerprint, sizeof(fingerprint));
-            if (strcmp(fingerprint, fingerprint_item->valuestring) != 0) {
-                result = ESP_ERR_INVALID_CRC;
-            } else {
-                result = pm_config_mark_network_tested(&s_credential_transaction);
-                if (result == ESP_OK) {
-                    result = pm_config_commit(&s_credential_transaction);
-                }
-                if (result == ESP_OK) {
-                    s_config = s_credential_candidate;
-                    s_network.config = s_credential_candidate;
-                    result = pm_hkdf_directional_keys(s_config.device_secret, s_config.device_secret_len,
-                                                      s_network.device_id_text,
-                                                      s_network.device_to_server_key, s_network.server_to_device_key);
-                }
-                memset(&s_credential_candidate, 0, sizeof(s_credential_candidate));
-                s_credential_prepared = false;
-            }
-        } else {
+        const cJSON *secret = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root,
+                                                                                     "device_secret_hex");
+        const cJSON *cancelled = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "cancelled");
+        if (!cJSON_IsObject(root)) {
             result = ESP_ERR_INVALID_ARG;
+        } else if (secret != NULL) {
+            result = credential_rotation_prepare(command, root, &durable_completion_pending);
+        } else if (cancelled != NULL) {
+            result = credential_rotation_cancel(command, root);
+        } else {
+            result = credential_rotation_commit(command, root, &durable_completion_pending);
         }
         cJSON_Delete(root);
         break;
@@ -1226,6 +1833,9 @@ static void control_task(void *argument)
     (void)esp_task_wdt_add(NULL);
     for (;;) {
         prepare_state_expire_if_needed();
+        if (rotation_expire_if_needed() != ESP_OK) {
+            ESP_LOGE(TAG, "credential rotation expiry cleanup remains failed closed");
+        }
         if (s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED &&
             s_prepare_record.phase < PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE) {
             const esp_err_t recovery_error = resume_destructive_transaction();
@@ -1234,9 +1844,22 @@ static void control_task(void *argument)
                          esp_err_to_name(recovery_error));
             }
         } else if (s_prepare_record.phase == PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED) {
-            if (prepare_state_clear() != ESP_OK) {
+            if (destructive_cleanup_acknowledged() != ESP_OK) {
                 ESP_LOGE(TAG, "acknowledged destructive journal cleanup failed");
             }
+        }
+        if ((s_rotation_record.phase >= PM_ROTATION_PHASE_CANDIDATE_PERSISTED &&
+             s_rotation_record.phase <= PM_ROTATION_PHASE_CONFIG_STAGED) ||
+            (s_rotation_record.phase >= PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED &&
+             s_rotation_record.phase < PM_ROTATION_PHASE_COMMAND_RESULT_DURABLE)) {
+            const esp_err_t recovery_error = resume_rotation_transaction();
+            if (recovery_error != ESP_OK) {
+                ESP_LOGW(TAG, "durable credential rotation recovery pending: %s",
+                         esp_err_to_name(recovery_error));
+            }
+        } else if (s_rotation_record.phase == PM_ROTATION_PHASE_RESULT_ACKNOWLEDGED &&
+                   rotation_cleanup_acknowledged() != ESP_OK) {
+            ESP_LOGE(TAG, "acknowledged credential rotation cleanup failed");
         }
         process_authenticated_result_acknowledgements();
         pm_command_t *command = NULL;
@@ -1268,6 +1891,26 @@ static void command_received(const pm_command_t *command, void *context)
     if (xQueueSend(s_command_queue, &mutable_command, 0U) != pdTRUE) {
         ESP_LOGE(TAG, "bounded command queue full");
     }
+}
+
+static esp_err_t enqueue_interrupted_rotation_commands(void)
+{
+    for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
+        pm_command_t *command = &s_commands.entries[i];
+        if (command->type != PM_COMMAND_ROTATE_DEVICE_CREDENTIALS ||
+            (command->state != PM_COMMAND_ACCEPTED && command->state != PM_COMMAND_RUNNING)) {
+            continue;
+        }
+        if (command->payload_redacted) {
+            /* A redacted prepare has a durable rotation journal and is resumed
+             * through that journal, never by reconstructing its secret. */
+            continue;
+        }
+        if (xQueueSend(s_command_queue, &command, 0U) != pdTRUE) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
 }
 
 static esp_err_t factory_reset_config_only(void *context)
@@ -1352,6 +1995,27 @@ void app_main(void)
 
     pm_time_init(&s_time, esp_timer_get_time());
     (void)pm_time_load_checkpoint(&s_time, esp_timer_get_time());
+    if (rotation_state_boot_load() != ESP_OK || rotation_expire_if_needed() != ESP_OK) {
+        ESP_LOGE(TAG, "credential rotation journal recovery failed closed");
+        (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
+        return;
+    }
+    if ((s_rotation_record.phase >= PM_ROTATION_PHASE_CANDIDATE_PERSISTED &&
+         s_rotation_record.phase <= PM_ROTATION_PHASE_CONFIG_STAGED) ||
+        (s_rotation_record.phase >= PM_ROTATION_PHASE_COMMIT_INTENT_SECRET_ZEROIZED &&
+         s_rotation_record.phase < PM_ROTATION_PHASE_COMMAND_RESULT_DURABLE)) {
+        const esp_err_t recovery_error = resume_rotation_transaction();
+        if (recovery_error != ESP_OK) {
+            ESP_LOGE(TAG, "credential rotation could not resume: %s", esp_err_to_name(recovery_error));
+            (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
+            return;
+        }
+    } else if (s_rotation_record.phase == PM_ROTATION_PHASE_RESULT_ACKNOWLEDGED &&
+               rotation_cleanup_acknowledged() != ESP_OK) {
+        ESP_LOGE(TAG, "credential rotation acknowledged cleanup failed closed");
+        (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
+        return;
+    }
     const gpio_config_t recovery_button = {
         .pin_bit_mask = UINT64_C(1) << PM_USB_RECOVERY_BUTTON,
         .mode = GPIO_MODE_INPUT,
@@ -1391,6 +2055,11 @@ void app_main(void)
                                             s_result_ack_queue_storage, &s_result_ack_queue_buffer);
     if (s_sample_queue == NULL || s_command_queue == NULL || s_result_ack_queue == NULL) {
         ESP_LOGE(TAG, "static queue creation failed");
+        return;
+    }
+    if (enqueue_interrupted_rotation_commands() != ESP_OK) {
+        ESP_LOGE(TAG, "interrupted credential rotation could not be requeued");
+        (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
         return;
     }
     (void)xTaskCreate(measurement_task, "pm_measurement", 4096U, NULL, 12U, NULL);

@@ -92,6 +92,7 @@ esp_err_t pm_network_serialize_permanent_loss(const pm_storage_health_t *storage
 esp_err_t pm_network_start(pm_network_context_t *context);
 esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_config_t *candidate,
                                        const char *enrollment_token, void *context);
+bool pm_network_parse_rfc3339_ms(const char *value, int64_t *utc_ms);
 
 #ifdef __cplusplus
 }

@@ -163,8 +163,8 @@ def main() -> int:
     images = [
         ('0x0', 'bootloader.bin'),
         ('0x8000', 'partition-table.bin'),
-        ('0x10000', 'ota_data_initial.bin'),
-        ('0x30000', 'firmware.bin'),
+        ('0x2D000', 'ota_data_initial.bin'),
+        ('0x40000', 'firmware.bin'),
     ]
     merge = [sys.executable, '-m', 'esptool', '--chip', 'esp32s3', 'merge-bin', '-o', str(output / 'merged-flash.bin')]
     for offset, name in images:

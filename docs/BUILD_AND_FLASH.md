@@ -20,6 +20,6 @@ To assemble the local RC artifact pack:
 .\tools\Flash-PowerMeterSensor.ps1 -Port COM7 -ArtifactDirectory .\release\out\0.1.0-rc.1
 ```
 
-The flash utility verifies every SHA-256 in `flash_args.json`, then writes bootloader at `0x0`, partition table at `0x8000`, OTA data at `0x10000`, and app at `0x30000`. It does not erase NVS. `merged-flash.bin` is an offline recovery image; use the verified per-image script for normal flashing.
+The flash utility verifies every SHA-256 in `flash_args.json`, then writes bootloader at `0x0`, partition table at `0x8000`, OTA data at `0x2D000`, and app at `0x40000`. It does not erase the 136 KiB NVS partition. `merged-flash.bin` is an offline recovery image; use the verified per-image script for normal flashing.
 
-The 16 MB partition table provides NVS, NVS keys, OTA metadata, bounded recovery/coredump partitions, and two equal 0x780000-byte OTA slots. It reserves no flash history database.
+The 16 MB partition table provides NVS, NVS keys, OTA metadata, a bounded coredump partition, and two equal 0x780000-byte OTA slots. It reserves no flash history database.
