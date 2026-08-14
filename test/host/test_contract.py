@@ -259,6 +259,8 @@ class ServerContractTests(unittest.TestCase):
         self.assertIn("secure_zero_memory(serialized, strlen(serialized))", network)
         self.assertIn("secure_zero_memory(response, sizeof(response))", network)
         self.assertIn("!ledger->entries[index].result_ack_required", command_source)
+        self.assertIn("ledger->entries[selected] = *previous", command_source)
+        self.assertIn("secure_zero_memory(&candidate, sizeof(candidate))", command_source)
         self.assertIn("pm_command_acknowledge_result", source)
         partitions = (ROOT / "partitions.csv").read_text(encoding="utf-8")
         self.assertIn("nvs,         data, nvs,       0x9000,   0x22000,", partitions)

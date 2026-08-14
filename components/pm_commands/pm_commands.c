@@ -1,6 +1,7 @@
 #include "pm_commands.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nvs.h"
@@ -18,6 +19,14 @@ static const char *const state_names[] = {
     "queued", "delivered", "accepted", "running", "succeeded", "failed", "expired", "cancelled",
     "superseded", "awaiting_reboot", "awaiting_heartbeat", "rolled_back",
 };
+
+static void secure_zero_memory(void *value, size_t length)
+{
+    volatile uint8_t *bytes = (volatile uint8_t *)value;
+    while (length-- > 0U) {
+        *bytes++ = 0U;
+    }
+}
 
 static uint32_t command_crc(const pm_command_t *command)
 {
@@ -49,7 +58,7 @@ static bool command_valid(const pm_command_t *command)
     uint8_t digest[PM_SHA256_SIZE] = {0};
     pm_sha256((const uint8_t *)command->payload, strlen(command->payload), digest);
     const bool valid = pm_constant_time_equal(digest, command->payload_sha256, sizeof(digest));
-    memset(digest, 0, sizeof(digest));
+    secure_zero_memory(digest, sizeof(digest));
     return valid;
 }
 
@@ -142,7 +151,7 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
             const bool matches = ledger->entries[i].type == incoming->type &&
                                  pm_constant_time_equal(ledger->entries[i].payload_sha256,
                                                         incoming_digest, sizeof(incoming_digest));
-            memset(incoming_digest, 0, sizeof(incoming_digest));
+            secure_zero_memory(incoming_digest, sizeof(incoming_digest));
             if (!matches) {
                 return ESP_ERR_INVALID_CRC;
             }
@@ -173,16 +182,36 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
          * bounded entries reaches a terminal, authenticated result. */
         return ESP_ERR_NO_MEM;
     }
+    pm_command_t *previous = malloc(sizeof(*previous));
+    if (previous == NULL) {
+        secure_zero_memory(&candidate, sizeof(candidate));
+        return ESP_ERR_NO_MEM;
+    }
+    *previous = ledger->entries[selected];
+    const uint8_t previous_next = ledger->next;
+    const uint32_t previous_generation = ledger->generation;
+    const uint32_t previous_crc = ledger->crc32;
     ledger->entries[selected] = candidate;
     pm_command_t *entry = &ledger->entries[selected];
     ledger->next = (uint8_t)((selected + 1U) % PM_COMMAND_LEDGER_SIZE);
     const esp_err_t error = persist(ledger);
     if (error != ESP_OK) {
+        ledger->entries[selected] = *previous;
+        ledger->next = previous_next;
+        ledger->generation = previous_generation;
+        ledger->crc32 = previous_crc;
+        secure_zero_memory(previous, sizeof(*previous));
+        free(previous);
+        secure_zero_memory(&candidate, sizeof(candidate));
         return error;
     }
     *stored = entry;
     *duplicate = false;
-    return candidate.state == PM_COMMAND_EXPIRED ? ESP_ERR_TIMEOUT : ESP_OK;
+    const bool expired = candidate.state == PM_COMMAND_EXPIRED;
+    secure_zero_memory(previous, sizeof(*previous));
+    free(previous);
+    secure_zero_memory(&candidate, sizeof(candidate));
+    return expired ? ESP_ERR_TIMEOUT : ESP_OK;
 }
 
 esp_err_t pm_command_transition(pm_command_ledger_t *ledger, pm_command_t *command, pm_command_state_t state,
