@@ -5,11 +5,27 @@ import hashlib
 import hmac
 import struct
 import unittest
+from pathlib import Path
 
 from pm_model import (
-    ABStore, CommandLedger, Interval, Journal, Scheduler, SequenceState, SimulatedDevice, canonical_query,
-    canonical_request, decode_record, directional_keys, encode_record, hkdf, modbus_crc16, protocol_vector,
-    pzem_parse, pzem_request, redact,
+    ABStore,
+    CommandLedger,
+    Interval,
+    Journal,
+    Scheduler,
+    SequenceState,
+    SimulatedDevice,
+    canonical_query,
+    canonical_request,
+    decode_record,
+    directional_keys,
+    encode_record,
+    hkdf,
+    modbus_crc16,
+    protocol_vector,
+    pzem_parse,
+    pzem_request,
+    redact,
 )
 
 
@@ -239,6 +255,17 @@ class SecurityTests(unittest.TestCase):
         device.synchronize(True)
         self.assertNotIn(sequence, device.server_sequences)
         self.assertIn(sequence, device.unavailable)
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_signed_tag_object_is_fetched_into_an_isolated_ref(self):
+        workflow = (
+            Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('signed_tag_ref="refs/powermeter-release-tags/${GITHUB_REF_NAME}"', workflow)
+        self.assertIn('"+refs/tags/${GITHUB_REF_NAME}:${signed_tag_ref}"', workflow)
+        self.assertIn('git rev-parse "${signed_tag_ref}^{tag}"', workflow)
+        self.assertIn('git rev-parse "${signed_tag_ref}^{}"', workflow)
 
 
 if __name__ == "__main__":
