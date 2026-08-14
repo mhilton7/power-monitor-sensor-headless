@@ -1,0 +1,13 @@
+{
+  "schema": "pm-hardware-certification-status/1.0.0",
+  "status": "pending",
+  "checked_at": "2026-08-13T00:00:00Z",
+  "candidate_driver": "pzem-004t-v4-classic-candidate",
+  "production_gate": "closed",
+  "blockers": [
+    "No physical marked PZEM-004T unit, included manual, or listing photographs were available in the workspace.",
+    "The official product page does not publish the revision-specific register map or TTL voltage behavior.",
+    "The marked-unit hardware-in-loop suite and 72-hour soak have not been run."
+  ],
+  "required_evidence_schema": "pm-hardware-certification/1.0.0"
+}

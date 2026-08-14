@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,13 @@
 
 #define PM_SAMPLE_QUEUE_DEPTH 8U
 #define PM_COMMAND_QUEUE_DEPTH 4U
+#define PM_RESULT_ACK_QUEUE_DEPTH 8U
+#define PM_PREPARE_NAMESPACE "pm_prepare"
+#define PM_PREPARE_SLOT_A "slot_a"
+#define PM_PREPARE_SLOT_B "slot_b"
+#define PM_PREPARE_LEGACY_KEY "active"
+#define PM_PREPARE_SCHEMA 2U
+#define PM_PREPARE_EXPIRY_US UINT64_C(600000000)
 
 #ifdef CONFIG_PM_HARDWARE_IDENTITY_VERIFIED
 #define PM_BUILD_HARDWARE_VERIFIED true
@@ -60,6 +68,12 @@ static QueueHandle_t s_sample_queue;
 static StaticQueue_t s_command_queue_buffer;
 static uint8_t s_command_queue_storage[PM_COMMAND_QUEUE_DEPTH * sizeof(pm_command_t *)];
 static QueueHandle_t s_command_queue;
+typedef struct {
+    char command_id[PM_COMMAND_ID_MAX + 1U];
+} pm_result_ack_event_t;
+static StaticQueue_t s_result_ack_queue_buffer;
+static uint8_t s_result_ack_queue_storage[PM_RESULT_ACK_QUEUE_DEPTH * sizeof(pm_result_ack_event_t)];
+static QueueHandle_t s_result_ack_queue;
 static pm_meter_driver_t s_meter;
 static pm_sequence_state_t s_sequence;
 static pm_storage_health_t s_storage;
@@ -70,10 +84,13 @@ static pm_time_state_t s_time;
 static pm_network_context_t s_network;
 static pm_provisioning_session_t s_provisioning;
 static pm_format_transaction_t s_format;
+static char s_format_prepare_command_id[PM_COMMAND_ID_MAX + 1U];
 static struct {
     uint8_t token[16];
+    char prepare_command_id[PM_COMMAND_ID_MAX + 1U];
     int64_t expires_us;
     uint32_t generation;
+    uint64_t server_floor;
     uint64_t floor;
     bool prepared;
     pm_format_transaction_t storage_format;
@@ -82,6 +99,255 @@ static pm_config_t s_credential_candidate;
 static pm_config_transaction_t s_credential_transaction;
 static bool s_credential_prepared;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t s_prepare_boot_session[16];
+
+typedef enum {
+    PM_PREPARE_KIND_NONE = 0,
+    PM_PREPARE_KIND_FORMAT_STORAGE = 1,
+    PM_PREPARE_KIND_DATA_RESET = 2,
+} pm_prepare_kind_t;
+
+typedef enum {
+    PM_PREPARE_PHASE_NONE = 0,
+    PM_PREPARE_PHASE_PREPARED = 1,
+    PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED = 2,
+    PM_PREPARE_PHASE_RESET_SEQUENCE_FLOOR_DURABLE = 3,
+    PM_PREPARE_PHASE_STORAGE_FORMAT_DURABLE = 4,
+    PM_PREPARE_PHASE_RESET_CONFIG_DURABLE = 5,
+    PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE = 6,
+    PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED = 7,
+} pm_prepare_phase_t;
+
+typedef struct {
+    uint32_t schema;
+    uint32_t journal_generation;
+    uint8_t kind;
+    uint8_t phase;
+    uint8_t reserved[2];
+    uint8_t boot_session[16];
+    uint8_t token[16];
+    char prepare_command_id[PM_COMMAND_ID_MAX + 1U];
+    char commit_command_id[PM_COMMAND_ID_MAX + 1U];
+    uint64_t expires_monotonic_us;
+    uint32_t reset_generation;
+    uint64_t server_sequence_floor;
+    uint64_t internal_sequence_floor;
+    uint64_t acknowledged_records_lost;
+    uint64_t unacknowledged_records_lost;
+    uint32_t crc32;
+} pm_prepare_record_t;
+
+static pm_prepare_record_t s_prepare_record;
+
+static uint32_t prepare_record_crc(const pm_prepare_record_t *record)
+{
+    return pm_crc32_ieee(record, offsetof(pm_prepare_record_t, crc32));
+}
+
+static bool bytes_are_zero(const uint8_t *bytes, size_t length)
+{
+    uint8_t combined = 0U;
+    for (size_t i = 0U; i < length; ++i) {
+        combined |= bytes[i];
+    }
+    return combined == 0U;
+}
+
+static bool persisted_command_id_valid(const char value[PM_COMMAND_ID_MAX + 1U])
+{
+    return value[PM_COMMAND_ID_MAX] == '\0' && memchr(value, '\0', PM_COMMAND_ID_MAX) == NULL;
+}
+
+static bool prepare_record_valid(const pm_prepare_record_t *record)
+{
+    if (record == NULL || record->schema != PM_PREPARE_SCHEMA || record->journal_generation == 0U ||
+        record->kind < PM_PREPARE_KIND_FORMAT_STORAGE || record->kind > PM_PREPARE_KIND_DATA_RESET ||
+        record->phase < PM_PREPARE_PHASE_PREPARED || record->phase > PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED ||
+        !persisted_command_id_valid(record->prepare_command_id) ||
+        record->crc32 != prepare_record_crc(record)) {
+        return false;
+    }
+    if (record->phase == PM_PREPARE_PHASE_PREPARED) {
+        return record->commit_command_id[0] == '\0' && record->expires_monotonic_us != 0U &&
+               !bytes_are_zero(record->boot_session, sizeof(record->boot_session)) &&
+               !bytes_are_zero(record->token, sizeof(record->token));
+    }
+    if (!persisted_command_id_valid(record->commit_command_id) ||
+        !bytes_are_zero(record->token, sizeof(record->token))) {
+        return false;
+    }
+    if (record->kind == PM_PREPARE_KIND_FORMAT_STORAGE &&
+        (record->phase == PM_PREPARE_PHASE_RESET_SEQUENCE_FLOOR_DURABLE ||
+         record->phase == PM_PREPARE_PHASE_RESET_CONFIG_DURABLE)) {
+        return false;
+    }
+    return record->kind != PM_PREPARE_KIND_DATA_RESET ||
+           (record->reset_generation != 0U &&
+            record->internal_sequence_floor >= record->server_sequence_floor);
+}
+
+static esp_err_t prepare_read_slot(nvs_handle_t handle, const char *key, pm_prepare_record_t *record,
+                                   bool *present)
+{
+    size_t size = sizeof(*record);
+    const esp_err_t error = nvs_get_blob(handle, key, record, &size);
+    *present = error != ESP_ERR_NVS_NOT_FOUND;
+    if (error != ESP_OK) {
+        return error;
+    }
+    return size == sizeof(*record) && prepare_record_valid(record) ? ESP_OK : ESP_ERR_INVALID_CRC;
+}
+
+static esp_err_t prepare_state_load(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(PM_PREPARE_NAMESPACE, NVS_READONLY, &handle);
+    if (error != ESP_OK) {
+        return error;
+    }
+    pm_prepare_record_t a = {0};
+    pm_prepare_record_t b = {0};
+    bool present_a = false;
+    bool present_b = false;
+    const bool valid_a = prepare_read_slot(handle, PM_PREPARE_SLOT_A, &a, &present_a) == ESP_OK;
+    const bool valid_b = prepare_read_slot(handle, PM_PREPARE_SLOT_B, &b, &present_b) == ESP_OK;
+    nvs_close(handle);
+    if (!valid_a && !valid_b) {
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        return present_a || present_b ? ESP_ERR_INVALID_CRC : ESP_ERR_NOT_FOUND;
+    }
+    s_prepare_record = valid_a && (!valid_b || a.journal_generation >= b.journal_generation) ? a : b;
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    return ESP_OK;
+}
+
+static esp_err_t prepare_state_persist(const pm_prepare_record_t *candidate)
+{
+    if (candidate == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    pm_prepare_record_t record = *candidate;
+    record.schema = PM_PREPARE_SCHEMA;
+    record.journal_generation = s_prepare_record.journal_generation + 1U;
+    if (record.journal_generation == 0U) {
+        memset(&record, 0, sizeof(record));
+        return ESP_ERR_INVALID_SIZE;
+    }
+    record.crc32 = prepare_record_crc(&record);
+    if (!prepare_record_valid(&record)) {
+        memset(&record, 0, sizeof(record));
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(PM_PREPARE_NAMESPACE, NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        const char *key = (record.journal_generation & 1U) != 0U ? PM_PREPARE_SLOT_A : PM_PREPARE_SLOT_B;
+        error = nvs_set_blob(handle, key, &record, sizeof(record));
+    }
+    if (error == ESP_OK) {
+        error = nvs_commit(handle);
+    }
+    pm_prepare_record_t verified = {0};
+    bool present = false;
+    if (error == ESP_OK) {
+        const char *key = (record.journal_generation & 1U) != 0U ? PM_PREPARE_SLOT_A : PM_PREPARE_SLOT_B;
+        error = prepare_read_slot(handle, key, &verified, &present);
+        if (error == ESP_OK && memcmp(&record, &verified, sizeof(record)) != 0) {
+            error = ESP_FAIL;
+        }
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+    if (error == ESP_OK) {
+        s_prepare_record = record;
+    }
+    memset(&record, 0, sizeof(record));
+    memset(&verified, 0, sizeof(verified));
+    return error;
+}
+
+static void prepare_live_zeroize(void)
+{
+    pm_storage_cancel_format(&s_format);
+    pm_storage_cancel_format(&s_reset.storage_format);
+    memset(s_format_prepare_command_id, 0, sizeof(s_format_prepare_command_id));
+    memset(&s_reset, 0, sizeof(s_reset));
+}
+
+static void prepare_state_zeroize(void)
+{
+    prepare_live_zeroize();
+    memset(&s_prepare_record, 0, sizeof(s_prepare_record));
+}
+
+static esp_err_t prepare_state_erase_persisted(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t error = nvs_open(PM_PREPARE_NAMESPACE, NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        const char *const keys[] = {PM_PREPARE_SLOT_A, PM_PREPARE_SLOT_B, PM_PREPARE_LEGACY_KEY};
+        for (size_t i = 0U; i < sizeof(keys) / sizeof(keys[0]) && error == ESP_OK; ++i) {
+            error = nvs_erase_key(handle, keys[i]);
+            if (error == ESP_ERR_NVS_NOT_FOUND) {
+                error = ESP_OK;
+            }
+        }
+    }
+    if (error == ESP_OK) {
+        error = nvs_commit(handle);
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+    return error;
+}
+
+static esp_err_t prepare_state_clear(void)
+{
+    const esp_err_t error = prepare_state_erase_persisted();
+    prepare_live_zeroize();
+    if (error == ESP_OK) {
+        memset(&s_prepare_record, 0, sizeof(s_prepare_record));
+    } else {
+        memset(s_prepare_record.token, 0, sizeof(s_prepare_record.token));
+        memset(s_prepare_record.boot_session, 0, sizeof(s_prepare_record.boot_session));
+    }
+    return error;
+}
+
+static esp_err_t prepare_state_boot_load(void)
+{
+    esp_fill_random(s_prepare_boot_session, sizeof(s_prepare_boot_session));
+    prepare_state_zeroize();
+    const esp_err_t error = prepare_state_load();
+    if (error == ESP_ERR_NOT_FOUND) {
+        return prepare_state_erase_persisted();
+    }
+    if (error != ESP_OK) {
+        return error;
+    }
+    if (s_prepare_record.phase == PM_PREPARE_PHASE_PREPARED) {
+        return prepare_state_clear();
+    }
+    return ESP_OK;
+}
+
+static void prepare_state_expire_if_needed(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    const bool record_expired = s_prepare_record.phase == PM_PREPARE_PHASE_PREPARED &&
+                                (now_us < 0 || (uint64_t)now_us > s_prepare_record.expires_monotonic_us);
+    if (record_expired) {
+        if (prepare_state_clear() != ESP_OK) {
+            ESP_LOGE(TAG, "expired destructive prepare NVS erase failed");
+        } else {
+            ESP_LOGI(TAG, "expired destructive prepare was zeroized and erased");
+        }
+    }
+}
 
 typedef struct {
     uint8_t device_id[16];
@@ -246,6 +512,12 @@ static bool hex_decode(const char *input, uint8_t *output, size_t length)
         return false;
     }
     for (size_t i = 0U; i < length; ++i) {
+        const char high = input[i * 2U];
+        const char low = input[i * 2U + 1U];
+        if ((!isdigit((unsigned char)high) && (high < 'a' || high > 'f')) ||
+            (!isdigit((unsigned char)low) && (low < 'a' || low > 'f'))) {
+            return false;
+        }
         unsigned int byte = 0U;
         if (sscanf(&input[i * 2U], "%2x", &byte) != 1) {
             return false;
@@ -255,61 +527,198 @@ static bool hex_decode(const char *input, uint8_t *output, size_t length)
     return true;
 }
 
-static bool ota_manifest_from_payload(const char *payload, pm_ota_manifest_t *manifest)
-{
-    cJSON *root = cJSON_Parse(payload);
-    if (root == NULL || manifest == NULL) {
-        cJSON_Delete(root);
-        return false;
-    }
-    memset(manifest, 0, sizeof(*manifest));
-    const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
-    const cJSON *build = cJSON_GetObjectItemCaseSensitive(root, "build_number");
-    const cJSON *project = cJSON_GetObjectItemCaseSensitive(root, "project_name");
-    const cJSON *target = cJSON_GetObjectItemCaseSensitive(root, "target_chip");
-    const cJSON *board = cJSON_GetObjectItemCaseSensitive(root, "board_profile");
-    const cJSON *min_boot = cJSON_GetObjectItemCaseSensitive(root, "minimum_boot_version");
-    const cJSON *min_config = cJSON_GetObjectItemCaseSensitive(root, "minimum_config_version");
-    const cJSON *protocol = cJSON_GetObjectItemCaseSensitive(root, "minimum_protocol");
-    const cJSON *size = cJSON_GetObjectItemCaseSensitive(root, "image_size");
-    const cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
-    const cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "download_url");
-    const cJSON *nonce = cJSON_GetObjectItemCaseSensitive(root, "manifest_nonce");
-    const cJSON *signature = cJSON_GetObjectItemCaseSensitive(root, "signature");
-    const bool valid = cJSON_IsString(version) && strlen(version->valuestring) <= PM_OTA_VERSION_MAX &&
-                       cJSON_IsNumber(build) && cJSON_IsString(project) && strlen(project->valuestring) <= PM_OTA_PROJECT_MAX &&
-                       cJSON_IsString(target) && strlen(target->valuestring) <= PM_OTA_TARGET_MAX && cJSON_IsString(board) &&
-                       strlen(board->valuestring) <= PM_OTA_BOARD_MAX && cJSON_IsNumber(min_boot) && cJSON_IsNumber(min_config) &&
-                       cJSON_IsString(protocol) && strlen(protocol->valuestring) <= PM_OTA_PROTOCOL_MAX && cJSON_IsNumber(size) &&
-                       cJSON_IsString(sha) && cJSON_IsString(url) && strlen(url->valuestring) <= PM_OTA_URL_MAX &&
-                       cJSON_IsString(nonce) && cJSON_IsString(signature) &&
-                       hex_decode(sha->valuestring, manifest->image_sha256, sizeof(manifest->image_sha256)) &&
-                       hex_decode(nonce->valuestring, manifest->manifest_nonce, sizeof(manifest->manifest_nonce)) &&
-                       hex_decode(signature->valuestring, manifest->signature, sizeof(manifest->signature));
-    if (valid) {
-        (void)snprintf(manifest->version, sizeof(manifest->version), "%s", version->valuestring);
-        manifest->build_number = (uint32_t)build->valuedouble;
-        (void)snprintf(manifest->project_name, sizeof(manifest->project_name), "%s", project->valuestring);
-        (void)snprintf(manifest->target_chip, sizeof(manifest->target_chip), "%s", target->valuestring);
-        (void)snprintf(manifest->board_profile, sizeof(manifest->board_profile), "%s", board->valuestring);
-        manifest->minimum_boot_version = (uint32_t)min_boot->valuedouble;
-        manifest->minimum_config_version = (uint32_t)min_config->valuedouble;
-        (void)snprintf(manifest->minimum_protocol, sizeof(manifest->minimum_protocol), "%s", protocol->valuestring);
-        manifest->image_size = (uint32_t)size->valuedouble;
-        (void)snprintf(manifest->download_url, sizeof(manifest->download_url), "%s", url->valuestring);
-    }
-    cJSON_Delete(root);
-    return valid;
-}
-
 static bool json_u64(const cJSON *root, const char *name, uint64_t *value)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
-    if (!cJSON_IsNumber(item) || item->valuedouble < 0.0) {
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0.0 ||
+        item->valuedouble > 9007199254740991.0) {
         return false;
     }
-    *value = (uint64_t)item->valuedouble;
+    const uint64_t parsed = (uint64_t)item->valuedouble;
+    if ((double)parsed != item->valuedouble) {
+        return false;
+    }
+    *value = parsed;
     return true;
+}
+
+static pm_command_t *find_command_by_id(const char *command_id)
+{
+    if (command_id == NULL || strlen(command_id) != PM_COMMAND_ID_MAX) {
+        return NULL;
+    }
+    for (size_t i = 0U; i < PM_COMMAND_LEDGER_SIZE; ++i) {
+        if (strcmp(s_commands.entries[i].command_id, command_id) == 0) {
+            return &s_commands.entries[i];
+        }
+    }
+    return NULL;
+}
+
+static esp_err_t persist_prepare_phase(pm_prepare_phase_t phase)
+{
+    pm_prepare_record_t candidate = s_prepare_record;
+    candidate.phase = (uint8_t)phase;
+    const esp_err_t error = prepare_state_persist(&candidate);
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+static esp_err_t begin_durable_commit_intent(pm_prepare_kind_t kind, pm_command_t *command)
+{
+    if (command == NULL || s_prepare_record.kind != (uint8_t)kind ||
+        s_prepare_record.phase != PM_PREPARE_PHASE_PREPARED ||
+        strlen(command->command_id) != PM_COMMAND_ID_MAX) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pm_prepare_record_t candidate = s_prepare_record;
+    candidate.phase = PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+    (void)snprintf(candidate.commit_command_id, sizeof(candidate.commit_command_id), "%s",
+                   command->command_id);
+    memset(candidate.token, 0, sizeof(candidate.token));
+    memset(candidate.boot_session, 0, sizeof(candidate.boot_session));
+    const esp_err_t error = prepare_state_persist(&candidate);
+    memset(&candidate, 0, sizeof(candidate));
+    if (error == ESP_OK) {
+        prepare_live_zeroize();
+    }
+    return error;
+}
+
+static esp_err_t persist_reset_configuration(const pm_prepare_record_t *record)
+{
+    if (record == NULL || record->kind != PM_PREPARE_KIND_DATA_RESET) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_config.reset_generation == record->reset_generation &&
+        s_config.sequence_floor == record->internal_sequence_floor &&
+        s_config.acknowledged_sequence == record->internal_sequence_floor) {
+        return ESP_OK;
+    }
+    if (s_config.reset_generation >= record->reset_generation ||
+        s_config.sequence_floor > record->internal_sequence_floor ||
+        s_config.acknowledged_sequence > record->internal_sequence_floor) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pm_config_t candidate = s_config;
+    candidate.sequence_floor = record->internal_sequence_floor;
+    candidate.acknowledged_sequence = record->internal_sequence_floor;
+    candidate.reset_generation = record->reset_generation;
+    pm_config_transaction_t transaction = {0};
+    esp_err_t error = pm_config_begin(&candidate, &transaction);
+    if (error == ESP_OK) {
+        error = pm_config_mark_network_tested(&transaction);
+    }
+    if (error == ESP_OK) {
+        error = pm_config_commit(&transaction);
+    }
+    if (error == ESP_OK) {
+        s_config = candidate;
+        s_network.config = candidate;
+    } else {
+        pm_config_abort(&transaction);
+    }
+    memset(&candidate, 0, sizeof(candidate));
+    return error;
+}
+
+static esp_err_t persist_destructive_command_result(pm_prepare_record_t *record, pm_command_t *command)
+{
+    if (record == NULL || command == NULL || strcmp(command->command_id, record->commit_command_id) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if ((record->kind == PM_PREPARE_KIND_FORMAT_STORAGE && command->type != PM_COMMAND_FORMAT_STORAGE_COMMIT) ||
+        (record->kind == PM_PREPARE_KIND_DATA_RESET && command->type != PM_COMMAND_DATA_RESET_COMMIT) ||
+        (command->state != PM_COMMAND_RUNNING && command->state != PM_COMMAND_SUCCEEDED)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (record->kind == PM_PREPARE_KIND_FORMAT_STORAGE) {
+        (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                       "{\"prepare_command_id\":\"%s\",\"acknowledged_records_lost\":%llu,"
+                       "\"unacknowledged_records_lost\":%llu,\"formatted\":true}",
+                       record->prepare_command_id,
+                       (unsigned long long)record->acknowledged_records_lost,
+                       (unsigned long long)record->unacknowledged_records_lost);
+        (void)snprintf(command->result_text, sizeof(command->result_text), "storage_formatted");
+    } else {
+        (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                       "{\"prepare_command_id\":\"%s\",\"reset_generation\":%lu,"
+                       "\"sequence_floor\":%llu}",
+                       record->prepare_command_id, (unsigned long)record->reset_generation,
+                       (unsigned long long)record->internal_sequence_floor);
+        (void)snprintf(command->result_text, sizeof(command->result_text), "data_reset_committed");
+    }
+    return pm_command_transition(&s_commands, command, PM_COMMAND_SUCCEEDED, 100U, ESP_OK);
+}
+
+static esp_err_t resume_destructive_transaction(void)
+{
+    if (s_prepare_record.phase < PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED ||
+        s_prepare_record.phase >= PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE) {
+        return ESP_OK;
+    }
+    pm_command_t *command = find_command_by_id(s_prepare_record.commit_command_id);
+    if (command == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    esp_err_t error = ESP_OK;
+    if (s_prepare_record.kind == PM_PREPARE_KIND_DATA_RESET &&
+        s_prepare_record.phase == PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED) {
+        error = pm_sequence_raise_floor(&s_sequence, s_prepare_record.internal_sequence_floor,
+                                        s_prepare_record.reset_generation);
+        if (error == ESP_OK) {
+            s_storage.acknowledged_sequence = s_sequence.acknowledged;
+            error = persist_prepare_phase(PM_PREPARE_PHASE_RESET_SEQUENCE_FLOOR_DURABLE);
+        }
+    }
+    const bool storage_due =
+        (s_prepare_record.kind == PM_PREPARE_KIND_FORMAT_STORAGE &&
+         s_prepare_record.phase == PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED) ||
+        (s_prepare_record.kind == PM_PREPARE_KIND_DATA_RESET &&
+         s_prepare_record.phase == PM_PREPARE_PHASE_RESET_SEQUENCE_FLOOR_DURABLE);
+    if (error == ESP_OK && storage_due) {
+        error = pm_storage_recover_authenticated_format();
+        if (error == ESP_OK) {
+            error = persist_prepare_phase(PM_PREPARE_PHASE_STORAGE_FORMAT_DURABLE);
+        }
+    }
+    if (error == ESP_OK && s_prepare_record.kind == PM_PREPARE_KIND_DATA_RESET &&
+        s_prepare_record.phase == PM_PREPARE_PHASE_STORAGE_FORMAT_DURABLE) {
+        error = persist_reset_configuration(&s_prepare_record);
+        if (error == ESP_OK) {
+            error = persist_prepare_phase(PM_PREPARE_PHASE_RESET_CONFIG_DURABLE);
+        }
+    }
+    const bool result_due =
+        (s_prepare_record.kind == PM_PREPARE_KIND_FORMAT_STORAGE &&
+         s_prepare_record.phase == PM_PREPARE_PHASE_STORAGE_FORMAT_DURABLE) ||
+        (s_prepare_record.kind == PM_PREPARE_KIND_DATA_RESET &&
+         s_prepare_record.phase == PM_PREPARE_PHASE_RESET_CONFIG_DURABLE);
+    if (error == ESP_OK && result_due) {
+        error = persist_destructive_command_result(&s_prepare_record, command);
+        if (error == ESP_OK) {
+            error = persist_prepare_phase(PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE);
+        }
+    }
+    return error;
+}
+
+static void process_authenticated_result_acknowledgements(void)
+{
+    if (s_result_ack_queue == NULL) {
+        return;
+    }
+    pm_result_ack_event_t acknowledged = {0};
+    while (xQueueReceive(s_result_ack_queue, &acknowledged, 0U) == pdTRUE) {
+        if (s_prepare_record.phase == PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE &&
+            strcmp(acknowledged.command_id, s_prepare_record.commit_command_id) == 0) {
+            if (persist_prepare_phase(PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED) != ESP_OK ||
+                prepare_state_clear() != ESP_OK) {
+                ESP_LOGE(TAG, "authenticated destructive result acknowledgement persistence failed");
+            }
+        }
+        memset(&acknowledged, 0, sizeof(acknowledged));
+    }
 }
 
 static void ota_progress(uint8_t percent, pm_ota_stage_t stage, void *context)
@@ -325,9 +734,16 @@ static void ota_task(void *argument)
 {
     pm_command_t *command = (pm_command_t *)argument;
     pm_ota_manifest_t manifest;
-    esp_err_t result = ota_manifest_from_payload(command->payload, &manifest)
-                           ? pm_ota_install(&manifest, s_config.ca_pem, s_network.server_to_device_key, ota_progress, command)
-                           : ESP_ERR_INVALID_ARG;
+    int64_t utc_ms = 0;
+    esp_err_t result = pm_ota_manifest_parse_payload(command->payload, s_config.server_origin,
+                                                     s_network.device_id_text, &manifest);
+    if (result == ESP_OK && !pm_time_now(&s_time, esp_timer_get_time(), &utc_ms)) {
+        result = ESP_ERR_INVALID_STATE;
+    }
+    if (result == ESP_OK) {
+        result = pm_ota_install(&manifest, s_config.ca_pem, s_network.device_to_server_key,
+                                s_network.server_to_device_key, utc_ms, ota_progress, command);
+    }
     if (result == ESP_OK) {
         (void)pm_command_transition(&s_commands, command, PM_COMMAND_AWAITING_REBOOT, 100U, ESP_OK);
         (void)pm_storage_flush(3000U);
@@ -345,8 +761,10 @@ static void execute_command(pm_command_t *command)
     if (command == NULL) {
         return;
     }
+    process_authenticated_result_acknowledgements();
     (void)pm_command_transition(&s_commands, command, PM_COMMAND_RUNNING, 1U, ESP_OK);
     esp_err_t result = ESP_OK;
+    bool durable_completion_pending = false;
     switch (command->type) {
     case PM_COMMAND_REBOOT:
         (void)pm_storage_flush(3000U);
@@ -394,20 +812,124 @@ static void execute_command(pm_command_t *command)
         result = pm_storage_rebuild_index(&s_storage);
         break;
     case PM_COMMAND_FORMAT_STORAGE_PREPARE: {
-        result = pm_storage_prepare_format((uint64_t)esp_timer_get_time(),
-                                           (uint64_t)esp_timer_get_time() + UINT64_C(60000000), &s_format);
-        char token[33];
-        pm_hex_lower(s_format.token, sizeof(s_format.token), token, sizeof(token));
-        (void)snprintf(command->result_text, sizeof(command->result_text),
-                       "token=%s,acknowledged_lost=%llu,unacknowledged_lost=%llu", token,
-                       (unsigned long long)s_format.acknowledged_records_lost,
-                       (unsigned long long)s_format.unacknowledged_records_lost);
+        cJSON *root = cJSON_Parse(command->payload);
+        const cJSON *token = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "confirmation_token");
+        uint8_t decoded[16] = {0};
+        uint64_t acknowledged_lost = 0U;
+        uint64_t unacknowledged_lost = 0U;
+        const bool durable_transaction_active =
+            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+        const esp_err_t clear_error = durable_transaction_active ? ESP_ERR_INVALID_STATE : prepare_state_clear();
+        if (root == NULL || cJSON_GetArraySize(root) != 1 || !cJSON_IsString(token) ||
+            !hex_decode(token->valuestring, decoded, sizeof(decoded))) {
+            result = ESP_ERR_INVALID_ARG;
+        } else if (clear_error != ESP_OK) {
+            result = clear_error;
+        } else {
+            const uint64_t now_us = (uint64_t)esp_timer_get_time();
+            const uint64_t expires_us = now_us + PM_PREPARE_EXPIRY_US;
+            result = pm_storage_prepare_format(now_us, expires_us, decoded, &s_format);
+            acknowledged_lost = s_format.acknowledged_records_lost;
+            unacknowledged_lost = s_format.unacknowledged_records_lost;
+            if (result == ESP_OK) {
+                (void)snprintf(s_format_prepare_command_id, sizeof(s_format_prepare_command_id), "%s",
+                               command->command_id);
+                pm_prepare_record_t record = {
+                    .schema = PM_PREPARE_SCHEMA,
+                    .kind = PM_PREPARE_KIND_FORMAT_STORAGE,
+                    .phase = PM_PREPARE_PHASE_PREPARED,
+                    .expires_monotonic_us = expires_us,
+                    .acknowledged_records_lost = acknowledged_lost,
+                    .unacknowledged_records_lost = unacknowledged_lost,
+                };
+                memcpy(record.boot_session, s_prepare_boot_session, sizeof(record.boot_session));
+                memcpy(record.token, decoded, sizeof(record.token));
+                (void)snprintf(record.prepare_command_id, sizeof(record.prepare_command_id), "%s",
+                               command->command_id);
+                result = prepare_state_persist(&record);
+                memset(&record, 0, sizeof(record));
+            }
+        }
+        if (result == ESP_OK) {
+            (void)snprintf(s_format_prepare_command_id, sizeof(s_format_prepare_command_id), "%s",
+                           command->command_id);
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"acknowledged_records_lost\":%llu,"
+                           "\"unacknowledged_records_lost\":%llu,\"ready\":true}",
+                           command->command_id, (unsigned long long)acknowledged_lost,
+                           (unsigned long long)unacknowledged_lost);
+            (void)snprintf(command->result_text, sizeof(command->result_text), "format_prepare_ready");
+        } else {
+            if (!durable_transaction_active) {
+                (void)prepare_state_clear();
+            }
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"ready\":false,\"reason\":\"%s\"}",
+                           command->command_id,
+                           result == ESP_ERR_INVALID_ARG ? "invalid_payload" :
+                           durable_transaction_active ? "durable_commit_active" : "prepare_state_io_failed");
+        }
+        memset(decoded, 0, sizeof(decoded));
+        cJSON_Delete(root);
         break;
     }
     case PM_COMMAND_FORMAT_STORAGE_COMMIT: {
-        uint8_t token[16];
-        result = hex_decode(command->payload, token, sizeof(token)) ? pm_storage_commit_format(&s_format, token) :
-                                                                    ESP_ERR_INVALID_ARG;
+        cJSON *root = cJSON_Parse(command->payload);
+        const cJSON *prepare_id = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "prepare_command_id");
+        const cJSON *token = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "confirmation_token");
+        uint8_t decoded[16] = {0};
+        char evidence_prepare_id[PM_COMMAND_ID_MAX + 1U] = {0};
+        const int64_t now_us = esp_timer_get_time();
+        const char *reason = "authorization_failed";
+        bool intent_durable = false;
+        const bool prior_durable_transaction =
+            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+        if (cJSON_IsString(prepare_id) && strlen(prepare_id->valuestring) == PM_COMMAND_ID_MAX) {
+            (void)snprintf(evidence_prepare_id, sizeof(evidence_prepare_id), "%s", prepare_id->valuestring);
+        } else if (s_prepare_record.prepare_command_id[0] != '\0') {
+            (void)snprintf(evidence_prepare_id, sizeof(evidence_prepare_id), "%s",
+                           s_prepare_record.prepare_command_id);
+        }
+        if (root == NULL || cJSON_GetArraySize(root) != 2 || !cJSON_IsString(prepare_id) ||
+            strlen(prepare_id->valuestring) != PM_COMMAND_ID_MAX || !cJSON_IsString(token) ||
+            !hex_decode(token->valuestring, decoded, sizeof(decoded))) {
+            result = ESP_ERR_INVALID_ARG;
+            reason = "invalid_payload";
+        } else if (s_prepare_record.kind != PM_PREPARE_KIND_FORMAT_STORAGE ||
+                   s_prepare_record.phase != PM_PREPARE_PHASE_PREPARED ||
+                   s_format.state != PM_FORMAT_PREPARED || s_format_prepare_command_id[0] == '\0') {
+            result = ESP_ERR_INVALID_STATE;
+            reason = "not_prepared";
+        } else if (now_us < 0 || (uint64_t)now_us > s_prepare_record.expires_monotonic_us) {
+            result = ESP_ERR_TIMEOUT;
+            reason = "expired";
+        } else if (strcmp(prepare_id->valuestring, s_prepare_record.prepare_command_id) != 0 ||
+                   !pm_constant_time_equal(s_prepare_record.boot_session, s_prepare_boot_session,
+                                           sizeof(s_prepare_boot_session)) ||
+                   !pm_constant_time_equal(s_prepare_record.token, decoded, sizeof(decoded))) {
+            result = ESP_ERR_INVALID_CRC;
+        } else {
+            result = begin_durable_commit_intent(PM_PREPARE_KIND_FORMAT_STORAGE, command);
+            if (result == ESP_OK) {
+                intent_durable = true;
+                result = resume_destructive_transaction();
+                durable_completion_pending = result != ESP_OK;
+                reason = "durable_recovery_pending";
+            } else {
+                reason = "prepare_state_io_failed";
+            }
+        }
+        if (result != ESP_OK && !intent_durable) {
+            if (!prior_durable_transaction) {
+                (void)prepare_state_clear();
+            }
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"ready\":false,\"reason\":\"%s\"}",
+                           evidence_prepare_id, reason);
+        }
+        memset(decoded, 0, sizeof(decoded));
+        memset(evidence_prepare_id, 0, sizeof(evidence_prepare_id));
+        cJSON_Delete(root);
         break;
     }
     case PM_COMMAND_OTA_INSTALL:
@@ -418,68 +940,186 @@ static void execute_command(pm_command_t *command)
         break;
     case PM_COMMAND_DATA_RESET_PREPARE: {
         cJSON *root = cJSON_Parse(command->payload);
+        const cJSON *token = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "confirmation_token");
         uint64_t generation = 0U;
         uint64_t server_floor = 0U;
-        if (root == NULL || !json_u64(root, "reset_generation", &generation) ||
-            !json_u64(root, "server_sequence_floor", &server_floor) || generation <= s_sequence.reset_generation ||
-            generation > UINT32_MAX) {
+        uint64_t internal_floor = 0U;
+        uint8_t decoded[16] = {0};
+        const bool durable_transaction_active =
+            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+        const esp_err_t clear_error = durable_transaction_active ? ESP_ERR_INVALID_STATE : prepare_state_clear();
+        if (root == NULL || cJSON_GetArraySize(root) != 3 || !cJSON_IsString(token) ||
+            !hex_decode(token->valuestring, decoded, sizeof(decoded)) ||
+            !json_u64(root, "reset_generation", &generation) ||
+            !json_u64(root, "server_sequence_floor", &server_floor) || s_sequence.reset_generation == UINT32_MAX ||
+            generation != (uint64_t)s_sequence.reset_generation + 1U) {
             result = ESP_ERR_INVALID_ARG;
-            cJSON_Delete(root);
-            break;
+        } else if (clear_error != ESP_OK) {
+            result = clear_error;
+        } else {
+            const int64_t now_us = esp_timer_get_time();
+            const uint64_t expires_us = (uint64_t)now_us + PM_PREPARE_EXPIRY_US;
+            internal_floor = server_floor > s_sequence.maximum_seen ? server_floor : s_sequence.maximum_seen;
+            memcpy(s_reset.token, decoded, sizeof(s_reset.token));
+            (void)snprintf(s_reset.prepare_command_id, sizeof(s_reset.prepare_command_id), "%s",
+                           command->command_id);
+            s_reset.expires_us = (int64_t)expires_us;
+            s_reset.generation = (uint32_t)generation;
+            s_reset.server_floor = server_floor;
+            s_reset.floor = internal_floor;
+            result = pm_storage_prepare_format((uint64_t)now_us, expires_us, s_reset.token,
+                                               &s_reset.storage_format);
+            s_reset.prepared = result == ESP_OK;
+            if (result == ESP_OK) {
+                pm_prepare_record_t record = {
+                    .schema = PM_PREPARE_SCHEMA,
+                    .kind = PM_PREPARE_KIND_DATA_RESET,
+                    .phase = PM_PREPARE_PHASE_PREPARED,
+                    .expires_monotonic_us = expires_us,
+                    .reset_generation = s_reset.generation,
+                    .server_sequence_floor = server_floor,
+                    .internal_sequence_floor = internal_floor,
+                    .acknowledged_records_lost = s_reset.storage_format.acknowledged_records_lost,
+                    .unacknowledged_records_lost = s_reset.storage_format.unacknowledged_records_lost,
+                };
+                memcpy(record.boot_session, s_prepare_boot_session, sizeof(record.boot_session));
+                memcpy(record.token, decoded, sizeof(record.token));
+                (void)snprintf(record.prepare_command_id, sizeof(record.prepare_command_id), "%s",
+                               command->command_id);
+                result = prepare_state_persist(&record);
+                memset(&record, 0, sizeof(record));
+            }
         }
+        if (result == ESP_OK) {
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"reset_generation\":%llu,"
+                           "\"server_sequence_floor\":%llu,\"sequence_floor\":%llu,\"ready\":true}",
+                           command->command_id, (unsigned long long)generation,
+                           (unsigned long long)server_floor, (unsigned long long)internal_floor);
+            (void)snprintf(command->result_text, sizeof(command->result_text), "data_reset_prepare_ready");
+        } else {
+            if (!durable_transaction_active) {
+                (void)prepare_state_clear();
+            }
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"ready\":false,\"reason\":\"%s\"}",
+                           command->command_id,
+                           result == ESP_ERR_INVALID_ARG ? "invalid_payload" :
+                           durable_transaction_active ? "durable_commit_active" : "prepare_state_io_failed");
+        }
+        memset(decoded, 0, sizeof(decoded));
         cJSON_Delete(root);
-        memset(&s_reset, 0, sizeof(s_reset));
-        esp_fill_random(s_reset.token, sizeof(s_reset.token));
-        s_reset.expires_us = esp_timer_get_time() + INT64_C(60000000);
-        s_reset.generation = (uint32_t)generation;
-        s_reset.floor = server_floor > s_sequence.maximum_seen ? server_floor : s_sequence.maximum_seen;
-        result = pm_storage_prepare_format((uint64_t)esp_timer_get_time(), (uint64_t)s_reset.expires_us,
-                                           &s_reset.storage_format);
-        s_reset.prepared = result == ESP_OK;
-        char encoded[33];
-        pm_hex_lower(s_reset.token, sizeof(s_reset.token), encoded, sizeof(encoded));
-        (void)snprintf(command->result_text, sizeof(command->result_text),
-                       "token=%s,generation=%lu,floor=%llu,preserve=enrollment+network+identity+pzem",
-                       encoded, (unsigned long)s_reset.generation, (unsigned long long)s_reset.floor);
         break;
     }
-    case PM_COMMAND_DATA_RESET_CANCEL:
-        memset(&s_reset, 0, sizeof(s_reset));
-        break;
-    case PM_COMMAND_DATA_RESET_COMMIT: {
-        /* The server must first confirm its reset generation and boundary. The
-         * commit repeats every prepared value and the typed token. */
+    case PM_COMMAND_DATA_RESET_CANCEL: {
         cJSON *root = cJSON_Parse(command->payload);
+        const cJSON *prepare_id = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root,
+                                                                                        "prepare_command_id");
+        char evidence_prepare_id[PM_COMMAND_ID_MAX + 1U] = {0};
+        if (cJSON_IsString(prepare_id) && strlen(prepare_id->valuestring) == PM_COMMAND_ID_MAX) {
+            (void)snprintf(evidence_prepare_id, sizeof(evidence_prepare_id), "%s", prepare_id->valuestring);
+        }
+        if (root == NULL || cJSON_GetArraySize(root) != 1 || !cJSON_IsString(prepare_id) ||
+            strlen(prepare_id->valuestring) != PM_COMMAND_ID_MAX) {
+            result = ESP_ERR_INVALID_ARG;
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"cancelled\":false,"
+                           "\"reason\":\"invalid_payload\"}", evidence_prepare_id);
+        } else if (!s_reset.prepared || s_prepare_record.kind != PM_PREPARE_KIND_DATA_RESET ||
+                   s_prepare_record.phase != PM_PREPARE_PHASE_PREPARED ||
+                   strcmp(prepare_id->valuestring, s_reset.prepare_command_id) != 0 ||
+                   strcmp(prepare_id->valuestring, s_prepare_record.prepare_command_id) != 0 ||
+                   !pm_constant_time_equal(s_prepare_record.boot_session, s_prepare_boot_session,
+                                           sizeof(s_prepare_boot_session))) {
+            result = ESP_ERR_INVALID_STATE;
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"cancelled\":false,"
+                           "\"reason\":\"not_prepared\"}", evidence_prepare_id);
+        } else if (esp_timer_get_time() > s_reset.expires_us ||
+                   (uint64_t)esp_timer_get_time() > s_prepare_record.expires_monotonic_us) {
+            result = ESP_ERR_TIMEOUT;
+            (void)prepare_state_clear();
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"cancelled\":false,"
+                           "\"reason\":\"expired\"}", evidence_prepare_id);
+        } else {
+            result = prepare_state_clear();
+            if (result == ESP_OK) {
+                (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                               "{\"prepare_command_id\":\"%s\",\"cancelled\":true}",
+                               evidence_prepare_id);
+            } else {
+                (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                               "{\"prepare_command_id\":\"%s\",\"cancelled\":false,"
+                               "\"reason\":\"prepare_state_io_failed\"}", evidence_prepare_id);
+            }
+        }
+        memset(evidence_prepare_id, 0, sizeof(evidence_prepare_id));
+        cJSON_Delete(root);
+        break;
+    }
+    case PM_COMMAND_DATA_RESET_COMMIT: {
+        cJSON *root = cJSON_Parse(command->payload);
+        const cJSON *prepare_id = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root,
+                                                                                        "prepare_command_id");
         const cJSON *token = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "confirmation_token");
         uint64_t generation = 0U;
         uint64_t floor = 0U;
-        char expected[33];
-        pm_hex_lower(s_reset.token, sizeof(s_reset.token), expected, sizeof(expected));
-        if (!s_reset.prepared || esp_timer_get_time() > s_reset.expires_us || !cJSON_IsString(token) ||
-            strlen(token->valuestring) != 32U || !json_u64(root, "reset_generation", &generation) ||
-            !json_u64(root, "sequence_floor", &floor) || generation != s_reset.generation || floor != s_reset.floor ||
-            !pm_constant_time_equal((const uint8_t *)expected, (const uint8_t *)token->valuestring, 32U)) {
-            result = ESP_ERR_INVALID_STATE;
-        } else {
-            result = pm_sequence_raise_floor(&s_sequence, s_reset.floor, s_reset.generation);
-            if (result == ESP_OK) {
-                result = pm_storage_commit_format(&s_reset.storage_format, s_reset.storage_format.token);
-            }
-            if (result == ESP_OK) {
-                s_config.sequence_floor = s_sequence.maximum_seen;
-                s_config.acknowledged_sequence = s_sequence.acknowledged;
-                s_config.reset_generation = s_sequence.reset_generation;
-                pm_config_transaction_t transaction;
-                result = pm_config_begin(&s_config, &transaction);
-                if (result == ESP_OK) {
-                    result = pm_config_mark_network_tested(&transaction);
-                }
-                if (result == ESP_OK) {
-                    result = pm_config_commit(&transaction);
-                }
-            }
-            memset(&s_reset, 0, sizeof(s_reset));
+        uint8_t decoded[16] = {0};
+        char evidence_prepare_id[PM_COMMAND_ID_MAX + 1U] = {0};
+        const int64_t now_us = esp_timer_get_time();
+        const char *reason = "authorization_failed";
+        bool intent_durable = false;
+        const bool prior_durable_transaction =
+            s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED;
+        if (cJSON_IsString(prepare_id) && strlen(prepare_id->valuestring) == PM_COMMAND_ID_MAX) {
+            (void)snprintf(evidence_prepare_id, sizeof(evidence_prepare_id), "%s", prepare_id->valuestring);
+        } else if (s_prepare_record.prepare_command_id[0] != '\0') {
+            (void)snprintf(evidence_prepare_id, sizeof(evidence_prepare_id), "%s",
+                           s_prepare_record.prepare_command_id);
         }
+        if (root == NULL || cJSON_GetArraySize(root) != 4 || !cJSON_IsString(prepare_id) ||
+            strlen(prepare_id->valuestring) != PM_COMMAND_ID_MAX || !cJSON_IsString(token) ||
+            !hex_decode(token->valuestring, decoded, sizeof(decoded)) ||
+            !json_u64(root, "reset_generation", &generation) || !json_u64(root, "sequence_floor", &floor)) {
+            result = ESP_ERR_INVALID_ARG;
+            reason = "invalid_payload";
+        } else if (!s_reset.prepared || s_prepare_record.kind != PM_PREPARE_KIND_DATA_RESET ||
+                   s_prepare_record.phase != PM_PREPARE_PHASE_PREPARED ||
+                   s_reset.prepare_command_id[0] == '\0') {
+            result = ESP_ERR_INVALID_STATE;
+            reason = "not_prepared";
+        } else if (now_us < 0 || (uint64_t)now_us > s_prepare_record.expires_monotonic_us) {
+            result = ESP_ERR_TIMEOUT;
+            reason = "expired";
+        } else if (strcmp(prepare_id->valuestring, s_prepare_record.prepare_command_id) != 0 ||
+                   generation != s_prepare_record.reset_generation ||
+                   floor != s_prepare_record.internal_sequence_floor ||
+                   !pm_constant_time_equal(s_prepare_record.boot_session, s_prepare_boot_session,
+                                           sizeof(s_prepare_boot_session)) ||
+                   !pm_constant_time_equal(s_prepare_record.token, decoded, sizeof(decoded))) {
+            result = ESP_ERR_INVALID_CRC;
+        } else {
+            result = begin_durable_commit_intent(PM_PREPARE_KIND_DATA_RESET, command);
+            if (result == ESP_OK) {
+                intent_durable = true;
+                result = resume_destructive_transaction();
+                durable_completion_pending = result != ESP_OK;
+                reason = "durable_recovery_pending";
+            } else {
+                reason = "prepare_state_io_failed";
+            }
+        }
+        if (result != ESP_OK && !intent_durable) {
+            if (!prior_durable_transaction) {
+                (void)prepare_state_clear();
+            }
+            (void)snprintf(command->evidence_json, sizeof(command->evidence_json),
+                           "{\"prepare_command_id\":\"%s\",\"ready\":false,\"reason\":\"%s\"}",
+                           evidence_prepare_id, reason);
+        }
+        memset(decoded, 0, sizeof(decoded));
+        memset(evidence_prepare_id, 0, sizeof(evidence_prepare_id));
         cJSON_Delete(root);
         break;
     }
@@ -569,8 +1209,15 @@ static void execute_command(pm_command_t *command)
         result = ESP_ERR_NOT_SUPPORTED;
         break;
     }
-    (void)pm_command_transition(&s_commands, command, result == ESP_OK ? PM_COMMAND_SUCCEEDED : PM_COMMAND_FAILED,
-                                result == ESP_OK ? 100U : command->progress_percent, result);
+    if (durable_completion_pending) {
+        (void)snprintf(command->result_text, sizeof(command->result_text), "durable_recovery_pending");
+        (void)pm_command_transition(&s_commands, command, PM_COMMAND_RUNNING,
+                                    command->progress_percent, result);
+    } else {
+        (void)pm_command_transition(&s_commands, command,
+                                    result == ESP_OK ? PM_COMMAND_SUCCEEDED : PM_COMMAND_FAILED,
+                                    result == ESP_OK ? 100U : command->progress_percent, result);
+    }
 }
 
 static void control_task(void *argument)
@@ -578,12 +1225,40 @@ static void control_task(void *argument)
     (void)argument;
     (void)esp_task_wdt_add(NULL);
     for (;;) {
+        prepare_state_expire_if_needed();
+        if (s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED &&
+            s_prepare_record.phase < PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE) {
+            const esp_err_t recovery_error = resume_destructive_transaction();
+            if (recovery_error != ESP_OK) {
+                ESP_LOGW(TAG, "durable destructive recovery pending: %s",
+                         esp_err_to_name(recovery_error));
+            }
+        } else if (s_prepare_record.phase == PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED) {
+            if (prepare_state_clear() != ESP_OK) {
+                ESP_LOGE(TAG, "acknowledged destructive journal cleanup failed");
+            }
+        }
+        process_authenticated_result_acknowledgements();
         pm_command_t *command = NULL;
         if (xQueueReceive(s_command_queue, &command, pdMS_TO_TICKS(1000)) == pdTRUE) {
             execute_command(command);
         }
         (void)esp_task_wdt_reset();
     }
+}
+
+static void authenticated_result_acknowledged(const char command_id[PM_COMMAND_ID_MAX + 1U], void *context)
+{
+    (void)context;
+    if (command_id == NULL || strlen(command_id) != PM_COMMAND_ID_MAX || s_result_ack_queue == NULL) {
+        return;
+    }
+    pm_result_ack_event_t event = {0};
+    (void)snprintf(event.command_id, sizeof(event.command_id), "%s", command_id);
+    if (xQueueSend(s_result_ack_queue, &event, 0U) != pdTRUE) {
+        ESP_LOGE(TAG, "authenticated result acknowledgement queue full");
+    }
+    memset(&event, 0, sizeof(event));
 }
 
 static void command_received(const pm_command_t *command, void *context)
@@ -649,6 +1324,11 @@ void app_main(void)
         (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
         return;
     }
+    if (prepare_state_boot_load() != ESP_OK) {
+        ESP_LOGE(TAG, "destructive transaction journal recovery failed closed");
+        (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
+        return;
+    }
     error = pm_config_load(&s_config);
     const bool provisioned = error == ESP_OK;
     if (!provisioned) {
@@ -687,6 +1367,16 @@ void app_main(void)
     if (error != ESP_OK) {
         set_degraded(PM_EVENT_STORAGE_FAILED);
     }
+    if (s_prepare_record.phase >= PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED &&
+        s_prepare_record.phase < PM_PREPARE_PHASE_COMMAND_RESULT_DURABLE) {
+        const esp_err_t recovery_error = resume_destructive_transaction();
+        if (recovery_error != ESP_OK) {
+            ESP_LOGE(TAG, "committed destructive transaction could not yet resume: %s",
+                     esp_err_to_name(recovery_error));
+            (void)pm_state_transition(&s_state, PM_EVENT_SELF_TEST_FAILED, esp_timer_get_time());
+            return;
+        }
+    }
     error = pm_meter_create(&s_meter, PM_METER_PZEM004T_V4_CLASSIC,
                             PM_BUILD_HARDWARE_VERIFIED, PM_BUILD_SIMULATED_METER);
     if (error != ESP_OK) {
@@ -697,7 +1387,9 @@ void app_main(void)
                                         &s_sample_queue_buffer);
     s_command_queue = xQueueCreateStatic(PM_COMMAND_QUEUE_DEPTH, sizeof(pm_command_t *), s_command_queue_storage,
                                          &s_command_queue_buffer);
-    if (s_sample_queue == NULL || s_command_queue == NULL) {
+    s_result_ack_queue = xQueueCreateStatic(PM_RESULT_ACK_QUEUE_DEPTH, sizeof(pm_result_ack_event_t),
+                                            s_result_ack_queue_storage, &s_result_ack_queue_buffer);
+    if (s_sample_queue == NULL || s_command_queue == NULL || s_result_ack_queue == NULL) {
         ESP_LOGE(TAG, "static queue creation failed");
         return;
     }
@@ -720,6 +1412,7 @@ void app_main(void)
         s_network.storage = &s_storage;
         s_network.commands = &s_commands;
         s_network.command_callback = command_received;
+        s_network.result_ack_callback = authenticated_result_acknowledged;
         pm_ota_checkpoint_t ota_checkpoint;
         if (pm_ota_load_checkpoint(&ota_checkpoint) == ESP_OK) {
             pm_network_health_update(&s_network, PM_HEALTH_OTA_FAILED, ota_checkpoint.stage == PM_OTA_FAILED);

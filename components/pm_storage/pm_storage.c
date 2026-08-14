@@ -30,6 +30,7 @@ typedef enum {
     STORAGE_MESSAGE_APPEND = 0,
     STORAGE_MESSAGE_FLUSH,
     STORAGE_MESSAGE_FORMAT,
+    STORAGE_MESSAGE_RECOVER_AUTHENTICATED_FORMAT,
     STORAGE_MESSAGE_READ_BATCH,
 } storage_message_type_t;
 
@@ -588,11 +589,13 @@ esp_err_t pm_storage_rebuild_index(pm_storage_health_t *health)
     return ESP_OK;
 }
 
-static esp_err_t format_storage(const uint8_t token[16])
+static esp_err_t format_storage(const uint8_t token[16], bool authenticated_recovery)
 {
-    if (s_card == NULL || s_format.state != PM_FORMAT_PREPARED ||
-        memcmp(s_format.token, token, sizeof(s_format.token)) != 0 ||
-        (uint64_t)esp_timer_get_time() > s_format.expires_monotonic_us) {
+    if (s_card == NULL ||
+        (!authenticated_recovery &&
+         (token == NULL || s_format.state != PM_FORMAT_PREPARED ||
+          memcmp(s_format.token, token, sizeof(s_format.token)) != 0 ||
+          (uint64_t)esp_timer_get_time() > s_format.expires_monotonic_us))) {
         return ESP_ERR_INVALID_STATE;
     }
     s_format.state = PM_FORMAT_COMMITTING;
@@ -632,7 +635,9 @@ static void storage_task(void *context)
         } else if (message.type == STORAGE_MESSAGE_FLUSH) {
             result = s_current == NULL ? ESP_OK : sync_file(s_current);
         } else if (message.type == STORAGE_MESSAGE_FORMAT) {
-            result = format_storage(message.format_token);
+            result = format_storage(message.format_token, false);
+        } else if (message.type == STORAGE_MESSAGE_RECOVER_AUTHENTICATED_FORMAT) {
+            result = format_storage(NULL, true);
         } else if (message.type == STORAGE_MESSAGE_READ_BATCH) {
             result = read_batch_owner(message.cursor, message.batch);
         }
@@ -713,13 +718,14 @@ esp_err_t pm_storage_read_batch(uint64_t after_sequence, pm_storage_batch_t *bat
     return send_and_wait(&message, timeout_ms);
 }
 
-esp_err_t pm_storage_prepare_format(uint64_t now_us, uint64_t expires_us, pm_format_transaction_t *transaction)
+esp_err_t pm_storage_prepare_format(uint64_t now_us, uint64_t expires_us, const uint8_t token[16],
+                                    pm_format_transaction_t *transaction)
 {
-    if (transaction == NULL || expires_us <= now_us || s_health == NULL) {
+    if (transaction == NULL || token == NULL || expires_us <= now_us || s_health == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     memset(&s_format, 0, sizeof(s_format));
-    esp_fill_random(s_format.token, sizeof(s_format.token));
+    memcpy(s_format.token, token, sizeof(s_format.token));
     s_format.acknowledged_records_lost = s_health->acknowledged_sequence >= s_health->oldest_sequence &&
                                                 s_health->oldest_sequence != 0U
                                             ? s_health->acknowledged_sequence - s_health->oldest_sequence + 1U
@@ -735,8 +741,13 @@ esp_err_t pm_storage_prepare_format(uint64_t now_us, uint64_t expires_us, pm_for
 
 esp_err_t pm_storage_commit_format(pm_format_transaction_t *transaction, const uint8_t token[16])
 {
-    if (transaction == NULL || token == NULL || transaction->state != PM_FORMAT_PREPARED ||
-        memcmp(transaction->token, token, sizeof(transaction->token)) != 0) {
+    uint8_t difference = 0U;
+    if (transaction != NULL && token != NULL) {
+        for (size_t i = 0U; i < sizeof(transaction->token); ++i) {
+            difference |= transaction->token[i] ^ token[i];
+        }
+    }
+    if (transaction == NULL || token == NULL || transaction->state != PM_FORMAT_PREPARED || difference != 0U) {
         return ESP_ERR_INVALID_ARG;
     }
     storage_message_t message = {.type = STORAGE_MESSAGE_FORMAT};
@@ -744,4 +755,18 @@ esp_err_t pm_storage_commit_format(pm_format_transaction_t *transaction, const u
     const esp_err_t error = send_and_wait(&message, 120000U);
     *transaction = s_format;
     return error;
+}
+
+esp_err_t pm_storage_recover_authenticated_format(void)
+{
+    storage_message_t message = {.type = STORAGE_MESSAGE_RECOVER_AUTHENTICATED_FORMAT};
+    return send_and_wait(&message, 120000U);
+}
+
+void pm_storage_cancel_format(pm_format_transaction_t *transaction)
+{
+    memset(&s_format, 0, sizeof(s_format));
+    if (transaction != NULL) {
+        memset(transaction, 0, sizeof(*transaction));
+    }
 }

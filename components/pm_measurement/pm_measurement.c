@@ -90,7 +90,14 @@ bool pm_interval_finalize(pm_interval_accumulator_t *accumulator, pm_durable_int
         .start_monotonic_us = accumulator->interval_start_monotonic_us,
         .end_monotonic_us = accumulator->last_sample_monotonic_us,
     };
-    if (accumulator->last_energy_wh >= accumulator->first_energy_wh) {
+    /* A cumulative counter delta needs two distinct authenticated frames.
+     * One surviving frame is incomplete evidence, never a measured zero. */
+    const bool have_delta_boundary = count >= 2U &&
+                                     accumulator->last_sample_monotonic_us >
+                                         accumulator->interval_start_monotonic_us;
+    if (!have_delta_boundary) {
+        interval->flags |= PM_INTERVAL_FLAG_MISSING_SAMPLE;
+    } else if (accumulator->last_energy_wh >= accumulator->first_energy_wh) {
         const uint64_t delta_mwh = (accumulator->last_energy_wh - accumulator->first_energy_wh) * 1000U;
         if (delta_mwh <= maximum_plausible_mwh) {
             interval->selected_energy_mwh = delta_mwh;

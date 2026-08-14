@@ -327,13 +327,14 @@ static bool lowercase_hex_sha256(const char *value)
     return true;
 }
 
-esp_err_t pm_verify_response(const uint8_t key[PM_SHA256_SIZE], const char *expected_device_id,
-                             const char *path, const char *query, int64_t now_utc_ms,
-                             const pm_response_auth_headers_t *headers, const uint8_t *body,
-                             size_t body_length, pm_nonce_cache_t *replay_cache)
+esp_err_t pm_verify_response_digest(const uint8_t key[PM_SHA256_SIZE], const char *expected_device_id,
+                                    const char *path, const char *query, int64_t now_utc_ms,
+                                    const pm_response_auth_headers_t *headers,
+                                    const char expected_content_sha256[PM_SHA256_HEX_SIZE + 1U],
+                                    pm_nonce_cache_t *replay_cache)
 {
-    if (key == NULL || expected_device_id == NULL || path == NULL || headers == NULL ||
-        (body == NULL && body_length != 0U) || replay_cache == NULL ||
+    if (key == NULL || expected_device_id == NULL || path == NULL || headers == NULL || replay_cache == NULL ||
+        !lowercase_hex_sha256(expected_content_sha256) ||
         strcmp(headers->protocol, PM_PROTOCOL_ID) != 0 ||
         strcmp(headers->device_id, expected_device_id) != 0 ||
         !lowercase_hex_sha256(headers->content_sha256)) {
@@ -351,11 +352,7 @@ esp_err_t pm_verify_response(const uint8_t key[PM_SHA256_SIZE], const char *expe
         strlen(headers->signature) != PM_SIGNATURE_BASE64_SIZE) {
         return ESP_ERR_INVALID_RESPONSE;
     }
-    uint8_t body_digest[PM_SHA256_SIZE];
-    char body_hex[PM_SHA256_HEX_SIZE + 1U];
-    pm_sha256(body, body_length, body_digest);
-    pm_hex_lower(body_digest, sizeof(body_digest), body_hex, sizeof(body_hex));
-    if (!pm_constant_time_equal((const uint8_t *)body_hex,
+    if (!pm_constant_time_equal((const uint8_t *)expected_content_sha256,
                                 (const uint8_t *)headers->content_sha256, PM_SHA256_HEX_SIZE)) {
         return ESP_ERR_INVALID_CRC;
     }
@@ -395,4 +392,20 @@ esp_err_t pm_verify_response(const uint8_t key[PM_SHA256_SIZE], const char *expe
     memset(presented, 0, sizeof(presented));
     memset(nonce_digest, 0, sizeof(nonce_digest));
     return ESP_OK;
+}
+
+esp_err_t pm_verify_response(const uint8_t key[PM_SHA256_SIZE], const char *expected_device_id,
+                             const char *path, const char *query, int64_t now_utc_ms,
+                             const pm_response_auth_headers_t *headers, const uint8_t *body,
+                             size_t body_length, pm_nonce_cache_t *replay_cache)
+{
+    if (body == NULL && body_length != 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t body_digest[PM_SHA256_SIZE];
+    char body_hex[PM_SHA256_HEX_SIZE + 1U];
+    pm_sha256(body, body_length, body_digest);
+    pm_hex_lower(body_digest, sizeof(body_digest), body_hex, sizeof(body_hex));
+    return pm_verify_response_digest(key, expected_device_id, path, query, now_utc_ms, headers,
+                                     body_hex, replay_cache);
 }

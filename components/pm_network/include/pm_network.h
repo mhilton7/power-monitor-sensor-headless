@@ -18,7 +18,6 @@ extern "C" {
 
 #define PM_NETWORK_RESPONSE_MAX 4096U
 #define PM_NETWORK_BODY_MAX 8192U
-#define PM_FIRMWARE_VERSION "0.1.0-rc.1"
 #define PM_ENROLL_ENDPOINT "/api/v1/devices/enroll"
 #define PM_HEARTBEAT_ENDPOINT "/api/v1/device/heartbeat"
 #define PM_READINGS_ENDPOINT "/api/v1/device/readings"
@@ -48,6 +47,7 @@ typedef struct {
 } pm_network_scheduler_t;
 
 typedef void (*pm_network_command_fn)(const pm_command_t *command, void *context);
+typedef void (*pm_network_result_ack_fn)(const char command_id[PM_COMMAND_ID_MAX + 1U], void *context);
 
 typedef enum {
     PM_HEALTH_TLS_VALIDATION_FAILURE = 1U << 0,
@@ -66,6 +66,8 @@ typedef struct {
     pm_command_ledger_t *commands;
     pm_network_command_fn command_callback;
     void *command_context;
+    pm_network_result_ack_fn result_ack_callback;
+    void *result_ack_context;
     char boot_id[37];
     pm_nonce_cache_t response_nonce_cache;
     uint32_t health_flags;

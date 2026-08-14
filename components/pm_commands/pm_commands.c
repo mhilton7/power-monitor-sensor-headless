@@ -3,7 +3,6 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "esp_random.h"
 #include "nvs.h"
 #include "pm_config.h"
 #include "pm_protocol.h"
@@ -35,6 +34,13 @@ static bool command_valid(const pm_command_t *command)
     return command->command_id[0] != '\0' && command->type < PM_COMMAND_TYPE_COUNT &&
            command->state <= PM_COMMAND_ROLLED_BACK && command->progress_percent <= 100U &&
            command->crc32 == command_crc(command);
+}
+
+static bool command_terminal(pm_command_state_t state)
+{
+    return state == PM_COMMAND_SUCCEEDED || state == PM_COMMAND_FAILED ||
+           state == PM_COMMAND_EXPIRED || state == PM_COMMAND_CANCELLED ||
+           state == PM_COMMAND_SUPERSEDED || state == PM_COMMAND_ROLLED_BACK;
 }
 
 static bool ledger_valid(const pm_command_ledger_t *ledger)
@@ -125,9 +131,24 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
     candidate.state = now_utc_ms > candidate.expires_utc_ms ? PM_COMMAND_EXPIRED : PM_COMMAND_ACCEPTED;
     candidate.progress_percent = 0U;
     candidate.crc32 = command_crc(&candidate);
-    ledger->entries[ledger->next] = candidate;
-    pm_command_t *entry = &ledger->entries[ledger->next];
-    ledger->next = (uint8_t)((ledger->next + 1U) % PM_COMMAND_LEDGER_SIZE);
+    size_t selected = PM_COMMAND_LEDGER_SIZE;
+    for (size_t offset = 0U; offset < PM_COMMAND_LEDGER_SIZE; ++offset) {
+        const size_t index = (ledger->next + offset) % PM_COMMAND_LEDGER_SIZE;
+        if (ledger->entries[index].command_id[0] == '\0' ||
+            command_terminal(ledger->entries[index].state)) {
+            selected = index;
+            break;
+        }
+    }
+    if (selected == PM_COMMAND_LEDGER_SIZE) {
+        /* Never discard an accepted/running/reboot-pending command merely to
+         * make room for a later command. The server can retry after one of the
+         * bounded entries reaches a terminal, authenticated result. */
+        return ESP_ERR_NO_MEM;
+    }
+    ledger->entries[selected] = candidate;
+    pm_command_t *entry = &ledger->entries[selected];
+    ledger->next = (uint8_t)((selected + 1U) % PM_COMMAND_LEDGER_SIZE);
     const esp_err_t error = persist(ledger);
     if (error != ESP_OK) {
         return error;
@@ -156,25 +177,6 @@ esp_err_t pm_command_transition(pm_command_ledger_t *ledger, pm_command_t *comma
     return persist(ledger);
 }
 
-esp_err_t pm_command_prepare(pm_command_ledger_t *ledger, pm_command_t *command, int64_t expires_monotonic_us,
-                             uint8_t token[PM_CONFIRMATION_TOKEN_SIZE])
-{
-    if (ledger == NULL || command == NULL || token == NULL || expires_monotonic_us <= 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    esp_fill_random(command->confirmation_token, sizeof(command->confirmation_token));
-    memcpy(token, command->confirmation_token, sizeof(command->confirmation_token));
-    command->confirmation_expires_monotonic_us = expires_monotonic_us;
-    return persist(ledger);
-}
-
-bool pm_command_confirmation_valid(const pm_command_t *prepared, const uint8_t token[PM_CONFIRMATION_TOKEN_SIZE],
-                                   int64_t now_monotonic_us)
-{
-    return prepared != NULL && token != NULL && now_monotonic_us <= prepared->confirmation_expires_monotonic_us &&
-           pm_constant_time_equal(prepared->confirmation_token, token, PM_CONFIRMATION_TOKEN_SIZE);
-}
-
 const char *pm_command_type_name(pm_command_type_t type)
 {
     return type < PM_COMMAND_TYPE_COUNT ? type_names[type] : "invalid";
@@ -198,4 +200,3 @@ bool pm_command_type_from_name(const char *name, pm_command_type_t *type)
     }
     return false;
 }
-

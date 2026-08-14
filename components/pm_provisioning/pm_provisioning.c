@@ -5,6 +5,7 @@
 
 #include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
+#include "esp_app_desc.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -169,7 +170,7 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
         char id_fingerprint[17];
         fingerprint(session->active.device_id, sizeof(session->active.device_id), id_fingerprint);
         cJSON_AddStringToObject(out, "device_fingerprint", id_fingerprint);
-        cJSON_AddStringToObject(out, "firmware", "0.1.0-rc.1");
+        cJSON_AddStringToObject(out, "firmware", esp_app_get_description()->version);
         cJSON_AddBoolToObject(out, "provisioned", session->active.generation != 0U);
         cJSON_AddBoolToObject(out, "physical_recovery", session->physically_authorized);
         cJSON_AddNumberToObject(out, "sequence_floor", (double)session->active.sequence_floor);

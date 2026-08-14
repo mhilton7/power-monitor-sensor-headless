@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://power-meter.invalid/schemas/device-destructive-commands-1.0.0.json",
+  "title": "PowerMeter V2 destructive command contract vectors",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_id", "prepare_expiry_seconds", "commands", "results"],
+  "properties": {
+    "contract_id": {"const": "pm-destructive-command-contract/1.0.0"},
+    "prepare_expiry_seconds": {"const": 600},
+    "commands": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/command"}
+    },
+    "results": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {"$ref": "#/$defs/result"}
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_id", "command_type", "not_before", "expires_at", "attempt",
+        "idempotency_key", "required_firmware_capability", "payload"
+      ],
+      "properties": {
+        "command_id": {"$ref": "#/$defs/uuid"},
+        "command_type": {
+          "enum": [
+            "format_storage_prepare", "format_storage_commit", "data_reset_prepare",
+            "data_reset_commit", "data_reset_cancel"
+          ]
+        },
+        "not_before": {"type": "string", "format": "date-time"},
+        "expires_at": {"type": "string", "format": "date-time"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 100},
+        "required_firmware_capability": {"const": "destructive_commands_v1"},
+        "payload": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 4,
+          "additionalProperties": {
+            "anyOf": [
+              {"type": "string"},
+              {"type": "integer", "minimum": 0}
+            ]
+          }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "state", "progress_percent", "result_code", "evidence"],
+      "properties": {
+        "command_id": {"$ref": "#/$defs/uuid"},
+        "state": {"enum": ["succeeded", "failed"]},
+        "progress_percent": {"type": "integer", "minimum": 0, "maximum": 100},
+        "result_code": {"type": "string", "minLength": 1, "maxLength": 80},
+        "evidence": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {"type": "string"},
+              {"type": "integer", "minimum": 0},
+              {"type": "boolean"},
+              {"type": "null"}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

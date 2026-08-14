@@ -12,10 +12,10 @@ extern "C" {
 
 #define PM_COMMAND_ID_MAX 36U
 #define PM_IDEMPOTENCY_KEY_MAX 100U
-#define PM_COMMAND_PAYLOAD_MAX 384U
+#define PM_COMMAND_PAYLOAD_MAX 1536U
 #define PM_COMMAND_RESULT_MAX 160U
+#define PM_COMMAND_EVIDENCE_MAX 384U
 #define PM_COMMAND_LEDGER_SIZE 8U
-#define PM_CONFIRMATION_TOKEN_SIZE 16U
 
 typedef enum {
     PM_COMMAND_REBOOT = 0,
@@ -63,8 +63,7 @@ typedef struct {
     uint8_t attempt;
     char payload[PM_COMMAND_PAYLOAD_MAX + 1U];
     char result_text[PM_COMMAND_RESULT_MAX + 1U];
-    uint8_t confirmation_token[PM_CONFIRMATION_TOKEN_SIZE];
-    int64_t confirmation_expires_monotonic_us;
+    char evidence_json[PM_COMMAND_EVIDENCE_MAX + 1U];
     int32_t result_code;
     uint32_t crc32;
 } pm_command_t;
@@ -81,10 +80,6 @@ esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *inc
                             pm_command_t **stored, bool *duplicate);
 esp_err_t pm_command_transition(pm_command_ledger_t *ledger, pm_command_t *command, pm_command_state_t state,
                                 uint8_t progress_percent, int32_t result_code);
-esp_err_t pm_command_prepare(pm_command_ledger_t *ledger, pm_command_t *command, int64_t expires_monotonic_us,
-                             uint8_t token[PM_CONFIRMATION_TOKEN_SIZE]);
-bool pm_command_confirmation_valid(const pm_command_t *prepared, const uint8_t token[PM_CONFIRMATION_TOKEN_SIZE],
-                                   int64_t now_monotonic_us);
 const char *pm_command_type_name(pm_command_type_t type);
 const char *pm_command_state_name(pm_command_state_t state);
 bool pm_command_type_from_name(const char *name, pm_command_type_t *type);

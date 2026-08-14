@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import struct
@@ -35,6 +37,8 @@ class ServerContractTests(unittest.TestCase):
         self.validate("device-heartbeat.json", "device-heartbeat.schema.json")
         self.validate("device-reading-batch.json", "device-reading-batch.schema.json")
         self.validate("device-permanent-loss.json", "device-permanent-loss.schema.json")
+        self.validate("device-ota-command.json", "device-ota-command.schema.json")
+        self.validate("device-destructive-commands.json", "device-destructive-commands.schema.json")
 
     def test_manifest_has_only_inspected_post_endpoints(self) -> None:
         manifest = self.load(VECTORS, "server-contract.json")
@@ -53,6 +57,115 @@ class ServerContractTests(unittest.TestCase):
         for item in manifest["requests"]:
             self.assertIn(item["path"], header)
         self.assertNotIn("/api/device/v1/", header + source)
+
+    def test_ota_command_and_authenticated_download_contract(self) -> None:
+        command = self.validate("device-ota-command.json", "device-ota-command.schema.json")
+        payload = command["payload"]
+        runtime_schema = self.load(ROOT / "release", "ota-device-manifest.schema.json")
+        runtime_validator = jsonschema.Draft202012Validator(
+            runtime_schema, format_checker=jsonschema.FormatChecker()
+        )
+        self.assertEqual([], [error.message for error in runtime_validator.iter_errors(payload)])
+        fields = (
+            "schema", "device_id", "deployment_id", "release_id", "semantic_version",
+            "build_number", "project_name", "target_chip", "board_profile",
+            "minimum_boot_version", "minimum_config_version", "minimum_protocol",
+            "image_size", "sha256", "download_path", "manifest_nonce",
+        )
+        canonical = "PM-OTA-MANIFEST-V1\n" + "\n".join(str(payload[name]) for name in fields)
+        secret = bytes(range(32))
+        salt = (PROTOCOL + "\0" + payload["device_id"]).encode()
+        pseudorandom_key = hmac.new(salt, secret, hashlib.sha256).digest()
+        server_key = hmac.new(
+            pseudorandom_key, b"PowerMeter V2\0server-to-device\x01", hashlib.sha256
+        ).digest()
+        expected = base64.b64encode(hmac.new(server_key, canonical.encode(), hashlib.sha256).digest()).decode()
+        self.assertEqual("82573a65e513e39fd5f0888de9a4494dc0e36055298691ac9bd6b30ddefb6a53",
+                         server_key.hex())
+        self.assertEqual("776085e83a14c0ecc89ee3170712fed6f841d5c06ba8e948ff702b3ec46d6469",
+                         hashlib.sha256(canonical.encode()).hexdigest())
+        self.assertEqual(expected, payload["signature"])
+        self.assertEqual(f"/api/v1/device/firmware/{payload['release_id']}", payload["download_path"])
+        manifest = self.load(VECTORS, "server-contract.json")
+        self.assertEqual("/api/v1/device/firmware/{release_id}", manifest["downloads"][0]["path_template"])
+        self.assertEqual("safe_restart_without_range", manifest["downloads"][0]["range_policy"])
+        command_header = (ROOT / "components" / "pm_commands" / "include" / "pm_commands.h").read_text(encoding="utf-8")
+        self.assertIn("#define PM_COMMAND_PAYLOAD_MAX 1536U", command_header)
+
+    def test_destructive_command_payloads_and_results_are_exact(self) -> None:
+        vectors = self.validate(
+            "device-destructive-commands.json", "device-destructive-commands.schema.json"
+        )
+        response_schema = self.load(CONTRACTS, "server-device-response.schema.json")
+        command_validator = jsonschema.Draft202012Validator(
+            response_schema["$defs"]["CommandEnvelope"],
+            format_checker=jsonschema.FormatChecker(),
+        )
+        heartbeat_schema = self.load(CONTRACTS, "device-heartbeat.schema.json")
+        result_validator = jsonschema.Draft202012Validator(
+            heartbeat_schema["$defs"]["CommandResult"],
+            format_checker=jsonschema.FormatChecker(),
+        )
+        for command in vectors["commands"]:
+            self.assertEqual([], [error.message for error in command_validator.iter_errors(command)])
+        for result in vectors["results"]:
+            self.assertEqual([], [error.message for error in result_validator.iter_errors(result)])
+
+        commands = {item["command_type"]: item for item in vectors["commands"]}
+        token_pattern = "00112233445566778899aabbccddeeff"
+        self.assertEqual({"confirmation_token": token_pattern}, commands["format_storage_prepare"]["payload"])
+        self.assertEqual(
+            {"prepare_command_id", "confirmation_token"},
+            set(commands["format_storage_commit"]["payload"]),
+        )
+        reset_prepare = commands["data_reset_prepare"]
+        reset_commit = commands["data_reset_commit"]
+        self.assertEqual(
+            {"confirmation_token", "reset_generation", "server_sequence_floor"},
+            set(reset_prepare["payload"]),
+        )
+        self.assertEqual(
+            {"prepare_command_id", "confirmation_token", "reset_generation", "sequence_floor"},
+            set(reset_commit["payload"]),
+        )
+        self.assertEqual(
+            reset_prepare["command_id"], reset_commit["payload"]["prepare_command_id"]
+        )
+        self.assertEqual(
+            {"prepare_command_id"}, set(commands["data_reset_cancel"]["payload"])
+        )
+
+        results = {item["command_id"]: item for item in vectors["results"]}
+        prepare_evidence = results[reset_prepare["command_id"]]["evidence"]
+        self.assertEqual(
+            {
+                "prepare_command_id", "reset_generation", "server_sequence_floor",
+                "sequence_floor", "ready",
+            },
+            set(prepare_evidence),
+        )
+        self.assertGreaterEqual(
+            prepare_evidence["sequence_floor"], prepare_evidence["server_sequence_floor"]
+        )
+        commit_evidence = results[reset_commit["command_id"]]["evidence"]
+        self.assertEqual(
+            {"prepare_command_id", "reset_generation", "sequence_floor"},
+            set(commit_evidence),
+        )
+        self.assertEqual(prepare_evidence["sequence_floor"], reset_commit["payload"]["sequence_floor"])
+        self.assertEqual(reset_commit["payload"]["sequence_floor"], commit_evidence["sequence_floor"])
+        self.assertNotIn("confirmation_token", json.dumps(vectors["results"]))
+
+        source = (ROOT / "main" / "app_main.c").read_text(encoding="utf-8")
+        network = (ROOT / "components" / "pm_network" / "pm_network.c").read_text(encoding="utf-8")
+        self.assertIn("#define PM_PREPARE_EXPIRY_US UINT64_C(600000000)", source)
+        self.assertIn("floor != s_prepare_record.internal_sequence_floor", source)
+        self.assertIn("prepare_state_boot_load", source)
+        self.assertIn("PM_PREPARE_PHASE_COMMIT_INTENT_TOKEN_ZEROIZED", source)
+        self.assertIn("PM_PREPARE_PHASE_RESULT_ACKNOWLEDGED", source)
+        self.assertIn("if (!structured_evidence)", network)
+        self.assertIn('strcmp(capability, "ota_v1")', network)
+        self.assertIn('strcmp(capability, "destructive_commands_v1")', network)
 
     def test_snapshots_are_byte_identical_to_sibling_server_when_present(self) -> None:
         shared = ROOT.parent / "shared" / "schemas"

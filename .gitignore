@@ -12,6 +12,8 @@ coverage/
 *.gcda
 *.gcno
 *.profraw
+__pycache__/
+*.py[cod]
 
 # Secrets and device/user artifacts
 *.pem
@@ -36,4 +38,3 @@ diagnostics-*.zip
 .idea/
 Thumbs.db
 .DS_Store
-

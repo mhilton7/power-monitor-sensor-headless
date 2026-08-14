@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 
-set(PROJECT_VER "0.1.0-rc.1")
+set(PM_FIRMWARE_VERSION "0.1.0-rc.1" CACHE STRING
+    "SemVer injected by the authenticated release-tag workflow")
+if(NOT PM_FIRMWARE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-rc\\.[1-9][0-9]*)?$")
+    message(FATAL_ERROR "PM_FIRMWARE_VERSION is not a supported release SemVer")
+endif()
+string(LENGTH "${PM_FIRMWARE_VERSION}" PM_FIRMWARE_VERSION_LENGTH)
+if(PM_FIRMWARE_VERSION_LENGTH GREATER 31)
+    message(FATAL_ERROR "PM_FIRMWARE_VERSION exceeds esp_app_desc_t capacity")
+endif()
+set(PROJECT_VER "${PM_FIRMWARE_VERSION}")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(power-monitor-sensor-headless)
-

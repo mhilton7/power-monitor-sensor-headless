@@ -83,6 +83,22 @@ def main() -> int:
         raise RuntimeError('PM_HIL_FIXTURE_TOKEN must be supplied outside source control')
     root = Path(__file__).resolve().parents[2]
     fixture = json.loads(args.fixture.read_text(encoding='utf-8'))
+    fixture_schema = json.loads((root / 'test' / 'hardware' / 'fixture.schema.json').read_text(encoding='utf-8'))
+    certification_schema = json.loads(
+        (root / 'release' / 'hardware-certification.schema.json').read_text(encoding='utf-8')
+    )
+    # Resolve the two local authoring references explicitly. This keeps the
+    # fixture schema reviewable without allowing jsonschema to fetch an
+    # attacker-controlled or unavailable URI during an offline HIL run.
+    fixture_schema['properties']['marked_unit'] = copy.deepcopy(
+        certification_schema['properties']['marked_unit']
+    )
+    fixture_schema['properties']['electrical'] = copy.deepcopy(
+        certification_schema['properties']['electrical']
+    )
+    jsonschema.Draft202012Validator(fixture_schema, format_checker=jsonschema.FormatChecker()).validate(fixture)
+    if fixture.get('operator', '').strip() == fixture.get('reviewer', '').strip():
+        raise RuntimeError('hardware certification requires independent operator and reviewer')
     firmware_hash = hashlib.sha256(args.firmware_bin.read_bytes()).hexdigest()
     commit = subprocess.run(('git','rev-parse','HEAD'),cwd=root,text=True,check=True,capture_output=True).stdout.strip()
     hello = serial_hello(args.port)
@@ -128,8 +144,9 @@ def main() -> int:
         'signoff':{'operator':fixture['operator'],'reviewer':fixture['reviewer'],'record_sha256':''},
     }
     document['signoff']['record_sha256'] = canonical_digest(document)
-    schema = json.loads((root/'release'/'hardware-certification.schema.json').read_text(encoding='utf-8'))
-    jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(document)
+    jsonschema.Draft202012Validator(
+        certification_schema, format_checker=jsonschema.FormatChecker()
+    ).validate(document)
     args.output.write_text(json.dumps(document, indent=2, sort_keys=True)+'\n',encoding='utf-8',newline='\n')
     print(json.dumps({'result':document['result'],'evidence':str(args.output),'device_fingerprint':hello['device_fingerprint']}))
     return 0 if document['result'] == 'pass' else 1

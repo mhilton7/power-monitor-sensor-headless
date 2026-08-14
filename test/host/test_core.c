@@ -131,6 +131,14 @@ static void test_aggregation(void)
     CHECK((interval.flags & PM_INTERVAL_FLAG_CT_WARNING_80) != 0U);
     CHECK((interval.flags & PM_INTERVAL_FLAG_CT_CRITICAL_90) != 0U);
 
+    pm_interval_init(&accumulator, 60U);
+    a = sample_at(101U, 4000000, 1000, true);
+    CHECK(pm_interval_add(&accumulator, &a, 100U));
+    CHECK(pm_interval_finalize(&accumulator, &interval, 10000U));
+    CHECK(interval.selected_energy_source == PM_ENERGY_NONE);
+    CHECK(interval.selected_energy_mwh == 0U);
+    CHECK((interval.flags & PM_INTERVAL_FLAG_MISSING_SAMPLE) != 0U);
+
     pm_interval_init(&accumulator, 2U);
     a = sample_at(500U, 1000000, 1000, false);
     b = sample_at(2U, 2000000, 1000, false);
@@ -231,4 +239,3 @@ int main(void)
     printf("{\"suite\":\"host-core\",\"assertions\":%u,\"failures\":%u}\n", tests_run, tests_failed);
     return tests_failed == 0U ? EXIT_SUCCESS : EXIT_FAILURE;
 }
-

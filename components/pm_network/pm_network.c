@@ -7,6 +7,7 @@
 
 #include "cJSON.h"
 #include "esp_event.h"
+#include "esp_app_desc.h"
 #include "esp_http_client.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -462,7 +463,7 @@ esp_err_t pm_network_serialize_heartbeat(pm_network_context_t *context, const pm
 
     cJSON_AddStringToObject(root, "protocol_id", PM_PROTOCOL_ID);
     cJSON_AddStringToObject(root, "boot_id", context->boot_id);
-    cJSON_AddStringToObject(root, "firmware_version", PM_FIRMWARE_VERSION);
+    cJSON_AddStringToObject(root, "firmware_version", esp_app_get_description()->version);
     cJSON_AddItemToObject(root, "measurement", measurement);
     cJSON_AddStringToObject(root, "storage_status", contract_storage_status(context->storage->status));
     cJSON_AddStringToObject(root, "time_status", time_trusted ? "trusted" : "untrusted");
@@ -562,8 +563,31 @@ esp_err_t pm_network_serialize_heartbeat(pm_network_context_t *context, const pm
         cJSON_AddStringToObject(result, "state", pm_command_state_name(command->state));
         cJSON_AddNumberToObject(result, "progress_percent", command->progress_percent);
         cJSON_AddStringToObject(result, "result_code", command_result_code(command, result_code));
-        cJSON_AddNumberToObject(evidence, "attempt", command->attempt);
-        if (command->result_text[0] != '\0') {
+        bool structured_evidence = false;
+        if (command->evidence_json[0] != '\0') {
+            cJSON *structured = cJSON_ParseWithLength(command->evidence_json, strlen(command->evidence_json));
+            bool safe = cJSON_IsObject(structured);
+            for (const cJSON *item = safe ? structured->child : NULL; item != NULL; item = item->next) {
+                safe = item->string != NULL && strstr(item->string, "token") == NULL &&
+                       strstr(item->string, "secret") == NULL &&
+                       (cJSON_IsString(item) || cJSON_IsNumber(item) || cJSON_IsBool(item) || cJSON_IsNull(item));
+                if (!safe) {
+                    break;
+                }
+            }
+            if (safe) {
+                cJSON_Delete(evidence);
+                evidence = structured;
+                structured_evidence = true;
+            } else {
+                cJSON_Delete(structured);
+                cJSON_AddStringToObject(evidence, "detail", "unsafe_structured_evidence_suppressed");
+            }
+        }
+        if (!structured_evidence) {
+            cJSON_AddNumberToObject(evidence, "attempt", command->attempt);
+        }
+        if (!structured_evidence && command->result_text[0] != '\0') {
             char redacted[PM_COMMAND_RESULT_MAX + 1U];
             pm_diagnostics_redact(command->result_text, redacted, sizeof(redacted));
             cJSON_AddStringToObject(evidence, "detail", redacted);
@@ -620,7 +644,7 @@ esp_err_t pm_network_serialize_reading_batch(const pm_storage_batch_t *batch, ch
         const pm_durable_interval_t *interval = &record->interval;
         if (record->sequence == 0U || record->sequence <= previous_sequence || interval->expected_samples == 0U ||
             interval->expected_samples > 3600U || interval->sample_count > 3600U ||
-            interval->end_monotonic_us <= interval->start_monotonic_us ||
+            interval->end_monotonic_us < interval->start_monotonic_us ||
             interval->selected_energy_source == PM_ENERGY_POWER_DIAGNOSTIC || interval->voltage_mv < 0 ||
             interval->current_ma < 0 || interval->active_power_mw < 0 || interval->frequency_mhz < 40000 ||
             interval->frequency_mhz > 70000 || interval->power_factor_milli < 0 ||
@@ -943,7 +967,25 @@ static bool capability_supported(const char *capability)
 {
     return capability == NULL || strcmp(capability, PM_PROTOCOL_ID) == 0 ||
            strcmp(capability, "headless-command-v1") == 0 || strcmp(capability, "esp-idf-ota-v1") == 0 ||
-           strcmp(capability, "storage-journal-v1") == 0;
+           strcmp(capability, "storage-journal-v1") == 0 || strcmp(capability, "ota_v1") == 0 ||
+           strcmp(capability, "destructive_commands_v1") == 0;
+}
+
+static void notify_authenticated_result_acceptance(pm_network_context_t *context, const char *request_body)
+{
+    if (context->result_ack_callback == NULL || request_body == NULL) {
+        return;
+    }
+    cJSON *root = cJSON_ParseWithLength(request_body, strlen(request_body));
+    const cJSON *results = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "command_results");
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, results) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "command_id");
+        if (cJSON_IsString(id) && strlen(id->valuestring) == PM_COMMAND_ID_MAX) {
+            context->result_ack_callback(id->valuestring, context->result_ack_context);
+        }
+    }
+    cJSON_Delete(root);
 }
 
 static void parse_commands(pm_network_context_t *context, const char *response)
@@ -1035,6 +1077,9 @@ static esp_err_t send_heartbeat(pm_network_context_t *context)
             error = pm_sequence_acknowledge(context->sequence, acknowledgement);
             if (error == ESP_OK) {
                 context->storage->acknowledged_sequence = acknowledgement;
+                /* The authenticated 2xx response is the server's acceptance of
+                 * every command result serialized in this exact request body. */
+                notify_authenticated_result_acceptance(context, body);
                 parse_commands(context, response);
             }
         }
@@ -1290,7 +1335,7 @@ esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_co
             } else {
                 cJSON_AddStringToObject(enrollment, "enrollment_token", enrollment_token);
                 cJSON_AddStringToObject(enrollment, "protocol_id", PM_PROTOCOL_ID);
-                cJSON_AddStringToObject(enrollment, "firmware_version", PM_FIRMWARE_VERSION);
+                cJSON_AddStringToObject(enrollment, "firmware_version", esp_app_get_description()->version);
                 uint8_t base_mac[6];
                 char hardware_fingerprint[32];
                 if (esp_efuse_mac_get_default(base_mac) != ESP_OK) {

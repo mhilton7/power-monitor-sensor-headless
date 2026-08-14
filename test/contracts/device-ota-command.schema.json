@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://power-meter.invalid/schemas/device-ota-command-1.0.0.json",
+  "title": "PowerMeter V2 OTA command envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "command_id", "command_type", "not_before", "expires_at", "attempt",
+    "idempotency_key", "required_firmware_capability", "payload"
+  ],
+  "properties": {
+    "command_id": {"type": "string", "format": "uuid"},
+    "command_type": {"const": "ota_install"},
+    "not_before": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 100},
+    "required_firmware_capability": {"const": "ota_v1"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "device_id", "deployment_id", "release_id", "semantic_version",
+        "build_number", "project_name", "target_chip", "board_profile",
+        "minimum_boot_version", "minimum_config_version", "minimum_protocol",
+        "image_size", "sha256", "download_path", "manifest_nonce", "signature"
+      ],
+      "properties": {
+        "schema": {"const": "pm-ota-manifest/1.0.0"},
+        "device_id": {"type": "string", "format": "uuid"},
+        "deployment_id": {"type": "string", "format": "uuid"},
+        "release_id": {"type": "string", "format": "uuid"},
+        "semantic_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$", "maxLength": 31},
+        "build_number": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "project_name": {"const": "power-monitor-sensor-headless"},
+        "target_chip": {"const": "esp32s3"},
+        "board_profile": {"const": "esp32-s3-devkitc-n16r8-reference/1"},
+        "minimum_boot_version": {"type": "integer", "minimum": 1, "maximum": 1},
+        "minimum_config_version": {"type": "integer", "minimum": 1},
+        "minimum_protocol": {"const": "pm-protocol/1.0.0"},
+        "image_size": {"type": "integer", "minimum": 1, "maximum": 7864320},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "download_path": {"type": "string", "pattern": "^/api/v1/device/firmware/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "maxLength": 95},
+        "manifest_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}
+      }
+    }
+  }
+}

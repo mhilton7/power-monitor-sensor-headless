@@ -107,8 +107,13 @@ esp_err_t pm_storage_start(const uint8_t device_id[16], pm_storage_health_t *hea
 esp_err_t pm_storage_append(const pm_journal_record_t *record, uint32_t timeout_ms);
 esp_err_t pm_storage_read_batch(uint64_t after_sequence, pm_storage_batch_t *batch, uint32_t timeout_ms);
 esp_err_t pm_storage_flush(uint32_t timeout_ms);
-esp_err_t pm_storage_prepare_format(uint64_t now_us, uint64_t expires_us, pm_format_transaction_t *transaction);
+esp_err_t pm_storage_prepare_format(uint64_t now_us, uint64_t expires_us, const uint8_t token[16],
+                                    pm_format_transaction_t *transaction);
 esp_err_t pm_storage_commit_format(pm_format_transaction_t *transaction, const uint8_t token[16]);
+/* Internal recovery primitive. The caller must first persist an authenticated,
+ * token-zeroized destructive commit intent in the CRC A/B journal. */
+esp_err_t pm_storage_recover_authenticated_format(void);
+void pm_storage_cancel_format(pm_format_transaction_t *transaction);
 esp_err_t pm_storage_rebuild_index(pm_storage_health_t *health);
 
 #ifdef __cplusplus

@@ -1,0 +1,11 @@
+# Data-only reset
+
+Data reset is not factory reset, unclaim, log clearing, or an ambiguous combined operation. Server-side deletion and sensor-side SD history formatting are coordinated by a reset generation and prepare/commit token.
+
+The server queues reset prepare with its next reset generation, current server sequence floor, and a server-generated 16-byte lowercase-hex confirmation token. Firmware prepares `max(server_sequence_floor, local maximum_seen)` and reports that actual boundary in authenticated structured evidence. The server must use that returned value in the signed commit payload; firmware rejects a different generation, prepare command ID, token, or floor.
+
+The prepared state is bounded to 600 seconds of the current monotonic boot session and is persisted in an A/B CRC-protected NVS journal with a random boot marker. Reboot invalidates, zeroizes, and erases only an uncommitted prepare because monotonic expiry is not comparable across boots. The server's command `expires_at` remains authoritative and may expire it earlier. Cancel accepts only the matching prepare ID, erases/zeroizes it, and leaves current history intact; a mismatched ID fails without disturbing the active prepare.
+
+After authenticating an exact commit, firmware atomically persists the intent while zeroizing the token. It then durably and idempotently raises the lifetime sequence floor, formats selected sensor history through the sole storage owner, commits reset generation/floor/ack configuration, and persists the original command result. A reboot at any phase resumes the same transaction rather than invalidating it. The journal remains pinned until an authenticated heartbeat response acknowledges the result, so the server always receives exactly `{prepare_command_id,reset_generation,sequence_floor}` before local recovery evidence is removed. Old pre-reset records therefore cannot repopulate History, even across power loss at a phase boundary.
+
+It preserves Wi-Fi/static IP/DNS, server origin/CA, device UUID and enrollment secret/directional keys, friendly name, CT/meter configuration, sequence/ack lifetime, and OTA compatibility. Routine reset never writes or resets the PZEM energy counter. Server reading/cost deletion, application-log deletion, true config factory reset, and server unclaim/revocation require separate permissions and actions.

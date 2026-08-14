@@ -145,7 +145,16 @@ esp_err_t pm_sequence_acknowledge(pm_sequence_state_t *state, uint64_t acknowled
 
 esp_err_t pm_sequence_raise_floor(pm_sequence_state_t *state, uint64_t floor, uint32_t reset_generation)
 {
-    if (state == NULL || floor < state->maximum_seen || reset_generation <= state->reset_generation || floor == UINT64_MAX) {
+    if (state == NULL || floor == UINT64_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (reset_generation == state->reset_generation) {
+        return state->maximum_seen == floor && state->next_sequence == floor + 1U &&
+                       state->reserved_through == floor && state->acknowledged == floor
+                   ? ESP_OK
+                   : ESP_ERR_INVALID_STATE;
+    }
+    if (floor < state->maximum_seen || reset_generation < state->reset_generation) {
         return ESP_ERR_INVALID_ARG;
     }
     pm_sequence_state_t candidate = *state;

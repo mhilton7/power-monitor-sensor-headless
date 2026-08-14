@@ -10,6 +10,8 @@ import json
 import re
 from pathlib import Path
 
+import jsonschema
+
 REPOSITORY = 'https://github.com/mhilton7/power-monitor-sensor-headless'
 TESTS = ('pzem_authenticated_samples','crc_rejection','wrong_slave_rejection','sd_recovery',
          'sequence_monotonic','ack_replay','https_chain','https_hostname','hmac_replay',
@@ -38,6 +40,9 @@ def main() -> int:
     parser.add_argument('--firmware-sha256')
     args = parser.parse_args()
     document = json.loads(args.evidence.read_text(encoding='utf-8'), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads((root / 'release' / 'hardware-certification.schema.json').read_text(encoding='utf-8'))
+    jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(document)
     require(document.get('schema') == 'pm-hardware-certification/1.0.0', 'wrong certification schema')
     require(document.get('result') == 'pass', 'certification result is not pass')
     firmware = document.get('firmware', {})
@@ -65,6 +70,7 @@ def main() -> int:
     require((ended-started).total_seconds() >= 72*3600, 'soak timestamps are shorter than 72 hours')
     signoff = document.get('signoff', {})
     require(bool(signoff.get('operator')) and bool(signoff.get('reviewer')), 'dual signoff missing')
+    require(signoff['operator'].strip() != signoff['reviewer'].strip(), 'operator and reviewer must be independent')
     require(signoff.get('record_sha256') == digest(document), 'certification canonical digest mismatch')
     print(json.dumps({'result':'pass','evidence_id':document.get('evidence_id'),'firmware_sha256':firmware['image_sha256']}))
     return 0

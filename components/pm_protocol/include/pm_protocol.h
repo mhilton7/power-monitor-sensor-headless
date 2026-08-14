@@ -81,6 +81,11 @@ esp_err_t pm_verify_response(const uint8_t key[PM_SHA256_SIZE], const char *expe
                              const char *path, const char *query, int64_t now_utc_ms,
                              const pm_response_auth_headers_t *headers, const uint8_t *body,
                              size_t body_length, pm_nonce_cache_t *replay_cache);
+esp_err_t pm_verify_response_digest(const uint8_t key[PM_SHA256_SIZE], const char *expected_device_id,
+                                    const char *path, const char *query, int64_t now_utc_ms,
+                                    const pm_response_auth_headers_t *headers,
+                                    const char expected_content_sha256[PM_SHA256_HEX_SIZE + 1U],
+                                    pm_nonce_cache_t *replay_cache);
 
 void pm_time_init(pm_time_state_t *state, int64_t monotonic_us);
 esp_err_t pm_time_load_checkpoint(pm_time_state_t *state, int64_t monotonic_us);
