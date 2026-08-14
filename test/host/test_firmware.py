@@ -266,6 +266,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('"+refs/tags/${GITHUB_REF_NAME}:${signed_tag_ref}"', workflow)
         self.assertIn('git rev-parse "${signed_tag_ref}^{tag}"', workflow)
         self.assertIn('git rev-parse "${signed_tag_ref}^{}"', workflow)
+        trust_step = 'git config --global --add safe.directory "$GITHUB_WORKSPACE"'
+        idf_trust_step = 'git config --global --add safe.directory "$IDF_PATH"'
+        verify_step = "Verify checked-out release source and pinned framework"
+        self.assertIn(trust_step, workflow)
+        self.assertIn(idf_trust_step, workflow)
+        self.assertLess(workflow.index(trust_step), workflow.index(verify_step))
+        self.assertLess(workflow.index(idf_trust_step), workflow.index(verify_step))
 
 
 if __name__ == "__main__":
