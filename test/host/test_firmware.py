@@ -258,10 +258,14 @@ class SecurityTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_signed_tag_object_is_fetched_into_an_isolated_ref(self):
-        workflow = (
+    @staticmethod
+    def _release_workflow() -> str:
+        return (
             Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
+
+    def test_signed_tag_object_is_fetched_into_an_isolated_ref(self):
+        workflow = self._release_workflow()
         self.assertIn('signed_tag_ref="refs/powermeter-release-tags/${GITHUB_REF_NAME}"', workflow)
         self.assertIn('"+refs/tags/${GITHUB_REF_NAME}:${signed_tag_ref}"', workflow)
         self.assertIn('git rev-parse "${signed_tag_ref}^{tag}"', workflow)
@@ -273,6 +277,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(idf_trust_step, workflow)
         self.assertLess(workflow.index(trust_step), workflow.index(verify_step))
         self.assertLess(workflow.index(idf_trust_step), workflow.index(verify_step))
+
+    def test_release_container_uses_only_the_idf_python_environment(self):
+        workflow = self._release_workflow()
+        build_release = workflow.split("\n  build_release:\n", 1)[1].split(
+            "\n  attest_release:\n", 1
+        )[0]
+        wrapper = "/opt/esp/entrypoint.sh python"
+        self.assertEqual(build_release.count(wrapper), 7)
+        raw_python_commands = [
+            line.strip()
+            for line in build_release.splitlines()
+            if line.strip().startswith(("run: python", "python "))
+        ]
+        self.assertEqual(raw_python_commands, [])
 
 
 if __name__ == "__main__":
