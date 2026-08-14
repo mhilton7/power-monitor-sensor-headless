@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "PermanentLossRange": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Sha256",
+          "type": "string"
+        },
+        "first_sequence": {
+          "exclusiveMinimum": 0,
+          "title": "First Sequence",
+          "type": "integer"
+        },
+        "last_sequence": {
+          "exclusiveMinimum": 0,
+          "title": "Last Sequence",
+          "type": "integer"
+        },
+        "reason_code": {
+          "enum": [
+            "time_untrusted",
+            "record_crc",
+            "segment_corrupt",
+            "operator_format",
+            "storage_failure"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "first_sequence",
+        "last_sequence",
+        "reason_code",
+        "evidence_sha256"
+      ],
+      "title": "PermanentLossRange",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "protocol_id": {
+      "const": "pm-protocol/1.0.0",
+      "title": "Protocol Id",
+      "type": "string"
+    },
+    "ranges": {
+      "items": {
+        "$ref": "#/$defs/PermanentLossRange"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Ranges",
+      "type": "array"
+    }
+  },
+  "required": [
+    "protocol_id",
+    "ranges"
+  ],
+  "title": "PermanentLossRequest",
+  "type": "object"
+}

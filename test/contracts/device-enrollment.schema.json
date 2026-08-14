@@ -1,0 +1,31 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "enrollment_token": {
+      "maxLength": 256,
+      "minLength": 32,
+      "type": "string"
+    },
+    "firmware_version": {
+      "maxLength": 80,
+      "minLength": 1,
+      "type": "string"
+    },
+    "hardware_fingerprint": {
+      "maxLength": 128,
+      "minLength": 8,
+      "type": "string"
+    },
+    "protocol_id": {
+      "const": "pm-protocol/1.0.0",
+      "type": "string"
+    }
+  },
+  "required": [
+    "enrollment_token",
+    "protocol_id",
+    "firmware_version",
+    "hardware_fingerprint"
+  ],
+  "type": "object"
+}

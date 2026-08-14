@@ -1,0 +1,403 @@
+{
+  "$defs": {
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "evidence": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Evidence",
+          "type": "object"
+        },
+        "progress_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Progress Percent",
+          "type": "integer"
+        },
+        "result_code": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Result Code",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "running",
+            "succeeded",
+            "failed",
+            "awaiting_reboot",
+            "awaiting_heartbeat",
+            "rolled_back"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "state",
+        "progress_percent",
+        "result_code"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "ElectricalMeasurement": {
+      "additionalProperties": false,
+      "properties": {
+        "active_power_w": {
+          "anyOf": [
+            {
+              "maximum": 300000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Power W"
+        },
+        "current_a": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current A"
+        },
+        "frequency_hz": {
+          "anyOf": [
+            {
+              "maximum": 70.0,
+              "minimum": 40.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frequency Hz"
+        },
+        "measured_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Measured At"
+        },
+        "monotonic_us": {
+          "minimum": 0,
+          "title": "Monotonic Us",
+          "type": "integer"
+        },
+        "power_factor": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power Factor"
+        },
+        "pzem_energy_wh": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pzem Energy Wh"
+        },
+        "pzem_error_code": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pzem Error Code"
+        },
+        "pzem_status": {
+          "enum": [
+            "ok",
+            "timeout",
+            "bad_crc",
+            "short_frame",
+            "wrong_address",
+            "invalid",
+            "absent"
+          ],
+          "title": "Pzem Status",
+          "type": "string"
+        },
+        "voltage_v": {
+          "anyOf": [
+            {
+              "maximum": 300.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voltage V"
+        }
+      },
+      "required": [
+        "measured_at",
+        "monotonic_us",
+        "pzem_status"
+      ],
+      "title": "ElectricalMeasurement",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "acknowledged_sequence": {
+      "minimum": 0,
+      "title": "Acknowledged Sequence",
+      "type": "integer"
+    },
+    "backlog": {
+      "minimum": 0,
+      "title": "Backlog",
+      "type": "integer"
+    },
+    "boot_id": {
+      "maxLength": 36,
+      "minLength": 36,
+      "title": "Boot Id",
+      "type": "string"
+    },
+    "command_results": {
+      "items": {
+        "$ref": "#/$defs/CommandResult"
+      },
+      "maxItems": 16,
+      "title": "Command Results",
+      "type": "array"
+    },
+    "firmware_version": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Firmware Version",
+      "type": "string"
+    },
+    "free_internal_heap": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Free Internal Heap"
+    },
+    "health_flags": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Health Flags",
+      "type": "array"
+    },
+    "ip_address": {
+      "anyOf": [
+        {
+          "maxLength": 45,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ip Address"
+    },
+    "largest_internal_block": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Largest Internal Block"
+    },
+    "measurement": {
+      "$ref": "#/$defs/ElectricalMeasurement"
+    },
+    "newest_sequence": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Newest Sequence"
+    },
+    "oldest_sequence": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Oldest Sequence"
+    },
+    "protocol_id": {
+      "const": "pm-protocol/1.0.0",
+      "title": "Protocol Id",
+      "type": "string"
+    },
+    "reboot_reason": {
+      "anyOf": [
+        {
+          "maxLength": 80,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reboot Reason"
+    },
+    "storage_status": {
+      "enum": [
+        "ok",
+        "missing",
+        "read_only",
+        "full",
+        "corrupt",
+        "degraded"
+      ],
+      "title": "Storage Status",
+      "type": "string"
+    },
+    "task_stack_watermarks": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Task Stack Watermarks",
+      "type": "object"
+    },
+    "time_status": {
+      "enum": [
+        "trusted",
+        "untrusted",
+        "stepped",
+        "disputed"
+      ],
+      "title": "Time Status",
+      "type": "string"
+    },
+    "wifi_rssi": {
+      "anyOf": [
+        {
+          "maximum": 0,
+          "minimum": -127,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Wifi Rssi"
+    }
+  },
+  "required": [
+    "protocol_id",
+    "boot_id",
+    "firmware_version",
+    "measurement",
+    "storage_status",
+    "time_status",
+    "backlog",
+    "acknowledged_sequence"
+  ],
+  "title": "HeartbeatRequest",
+  "type": "object"
+}
