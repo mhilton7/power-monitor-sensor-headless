@@ -299,6 +299,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Trust the exact checked-out workspace inside the pinned build container
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$IDF_PATH"
       - name: Verify checked-out release source and pinned framework
         shell: bash
         run: |
