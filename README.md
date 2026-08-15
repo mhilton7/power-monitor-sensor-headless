@@ -6,7 +6,7 @@ The sole authority for voltage, current, power, frequency, power factor, cumulat
 
 ## Release status
 
-`0.1.0-rc.4` is buildable and host-tested, but physical certification is pending. RC4 updates only release identity and immutable cross-repository traceability for the audited server RC4 contract; firmware runtime behavior and `pm-protocol/1.0.0` are unchanged from public RC3. The selected `pzem-004t-v4-classic-candidate` request/register layout is disabled unless its marked unit has machine-readable evidence. Stable builds also require encrypted NVS. Simulation cannot open either gate; see [hardware identity](docs/HARDWARE_IDENTITY.md) and [hardware certification](docs/HARDWARE_CERTIFICATION.md).
+`0.1.0-rc.5` is buildable and host-tested, but physical certification is pending. RC5 updates only release identity and immutable cross-repository traceability for the audited server RC5 contract; firmware runtime behavior and `pm-protocol/1.0.0` are unchanged from public RC4. Firmware RC4 remains public, while the matching server RC4 release assembly was skipped after its digest-pinned deployment smoke exposed a release-orchestration defect; no server RC4 GitHub Release or install bundle was published. The selected `pzem-004t-v4-classic-candidate` request/register layout is disabled unless its marked unit has machine-readable evidence. Stable builds also require encrypted NVS. Simulation cannot open either gate; see [hardware identity](docs/HARDWARE_IDENTITY.md) and [hardware certification](docs/HARDWARE_CERTIFICATION.md).
 
 ## Build and test
 
