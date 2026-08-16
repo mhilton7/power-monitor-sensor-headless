@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$')][string]$Version = '0.1.0-rc.6',
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$')][string]$Version = '0.1.0-rc.8',
     [ValidateRange(1,2147483647)][int]$BuildNumber = 1,
-    [ValidatePattern('^https://')][string]$DownloadBase = 'https://power-monitor.home.arpa:8443/api/firmware/releases/0.1.0-rc.6',
+    [ValidatePattern('^https://')][string]$DownloadBase = 'https://power-monitor.home.arpa:8443/api/firmware/releases/0.1.0-rc.8',
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '..\build-release'),
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\release\out\0.1.0-rc.6')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\release\out\0.1.0-rc.8')
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -19,6 +19,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Host tests failed.' }
     -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.release-candidate' `
     -D "PM_FIRMWARE_VERSION=$Version" set-target esp32s3 build
 if ($LASTEXITCODE -ne 0) { throw 'ESP-IDF release-candidate build failed.' }
+& python (Join-Path $PSScriptRoot 'verify_firmware_profile.py') `
+    --sdkconfig-header (Join-Path $BuildDirectory 'config\sdkconfig.h') --profile release-candidate
+if ($LASTEXITCODE -ne 0) { throw 'Compiled firmware profile verification failed.' }
 $auditPath = Join-Path $root 'test-results\dependency-audit.json'
 & python (Join-Path $PSScriptRoot 'audit_dependencies.py') --output $auditPath
 if ($LASTEXITCODE -ne 0) { throw 'OSV dependency audit failed.' }

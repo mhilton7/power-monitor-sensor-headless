@@ -34,6 +34,13 @@ jobs:
           components/pm_measurement/pm_measurement.c components/pm_storage/pm_journal.c
           components/pm_config/pm_state.c
           -o "$RUNNER_TEMP/test_core" && "$RUNNER_TEMP/test_core"
+      - name: Compile and run physical PZEM admission and UART regression
+        run: >-
+          cc -std=c11 -Wall -Wextra -Werror
+          -Itest/host/stubs -Icomponents/pm_meter/include -Icomponents/pm_config/include
+          test/host/test_pm_meter_io.c components/pm_meter/pm_meter.c
+          components/pm_meter/pm_meter_pzem_v4_classic.c
+          -o "$RUNNER_TEMP/test_pm_meter_io" && "$RUNNER_TEMP/test_pm_meter_io"
       - name: Compile and run command-ledger A/B recovery regression
         run: |
           cc -std=c11 -Wall -Wextra -Werror -Wframe-larger-than=3072 \
@@ -59,6 +66,18 @@ jobs:
           -Itest/host/stubs -Imain
           test/host/test_runtime_startup.c main/runtime_startup.c
           -o "$RUNNER_TEMP/test_runtime_startup" && "$RUNNER_TEMP/test_runtime_startup"
+      - name: Compile and run authenticated HTTP response and OTA policy regressions
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Itest/host/stubs -Icomponents/pm_protocol/include \
+            test/host/test_pm_http_response.c components/pm_protocol/pm_http_response.c \
+            -o "$RUNNER_TEMP/test_pm_http_response"
+          "$RUNNER_TEMP/test_pm_http_response"
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Itest/host/stubs -Icomponents/pm_ota/include -Icomponents/pm_network/include \
+            test/host/test_pm_ota_policy.c components/pm_ota/pm_ota_version.c \
+            components/pm_network/pm_command_envelope.c -o "$RUNNER_TEMP/test_pm_ota_policy"
+          "$RUNNER_TEMP/test_pm_ota_policy"
       - name: Run production pure-C tests under ASan and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
@@ -72,6 +91,17 @@ jobs:
           components/pm_measurement/pm_measurement.c components/pm_storage/pm_journal.c
           components/pm_config/pm_state.c
           -o "$RUNNER_TEMP/test_core_sanitized" && "$RUNNER_TEMP/test_core_sanitized"
+      - name: Run PZEM admission and UART regression under ASan and UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: >-
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror
+          -fsanitize=address,undefined -fno-omit-frame-pointer
+          -Itest/host/stubs -Icomponents/pm_meter/include -Icomponents/pm_config/include
+          test/host/test_pm_meter_io.c components/pm_meter/pm_meter.c
+          components/pm_meter/pm_meter_pzem_v4_classic.c
+          -o "$RUNNER_TEMP/test_pm_meter_io_sanitized" && "$RUNNER_TEMP/test_pm_meter_io_sanitized"
 
   esp-idf-build:
     runs-on: ubuntu-24.04
@@ -95,6 +125,10 @@ jobs:
           /opt/esp/entrypoint.sh idf.py -B build-ci -D 'SDKCONFIG=build-ci/sdkconfig'
           -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.release-candidate'
           set-target esp32s3 build
+      - name: Verify compiled PZEM and timing profile
+        run: >-
+          /opt/esp/entrypoint.sh python tools/verify_firmware_profile.py
+          --sdkconfig-header build-ci/config/sdkconfig.h --profile release-candidate
       - name: Compile and run provisioning state-machine regression
         run: |
           cc -std=c11 -Wall -Wextra -Werror -Wframe-larger-than=3072 \

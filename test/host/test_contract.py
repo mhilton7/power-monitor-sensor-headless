@@ -187,6 +187,25 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
+    def test_rc8_release_identity_is_coordinated_with_server_rc8(self) -> None:
+        expected_tag = "v0.1.0-rc.8"
+        expected_openapi_sha256 = (
+            "b7f8726f73633bd577da2cd3a9bfb7a2104615dafb44681564cd81fce8c8148f"
+        )
+        manifest = self.load(VECTORS, "server-contract.json")
+        self.assertEqual(
+            expected_openapi_sha256,
+            manifest["shared_contract_sha256"]["power-meter-v2.openapi.json"],
+        )
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_builder = (ROOT / "tools" / "build_release.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f'--server-tag "{expected_tag}"', workflow)
+        self.assertIn(f"default='{expected_tag}'", release_builder)
+
     def test_credential_rotation_payloads_results_and_key_cutover_are_exact(self) -> None:
         vectors = self.validate(
             "device-credential-rotation.json", "device-credential-rotation.schema.json"

@@ -38,6 +38,16 @@
 #error "Stable production firmware requires an explicit PZEM variant and machine-readable hardware identity evidence"
 #endif
 
+#if CONFIG_PM_PZEM_LIVE_VALIDATION && (!CONFIG_PM_RELEASE_CANDIDATE || CONFIG_PM_PRODUCTION_RELEASE || \
+                                       CONFIG_PM_SIMULATED_METER || \
+                                       !CONFIG_PM_METER_VARIANT_PZEM004T_V4_CLASSIC)
+#error "PZEM live validation requires a non-production, non-simulated RC with the exact candidate driver"
+#endif
+
+#if CONFIG_PM_PZEM_LIVE_VALIDATION && CONFIG_PM_HARDWARE_IDENTITY_VERIFIED
+#error "Candidate live validation must not claim certified hardware identity"
+#endif
+
 #if CONFIG_PM_PRODUCTION_RELEASE && !CONFIG_NVS_ENCRYPTION
 #error "Stable production firmware requires NVS encryption backed by a deliberately provisioned device HMAC key"
 #endif
@@ -72,9 +82,11 @@
                                PM_CONTROL_READY_BIT | PM_SUPERVISOR_READY_BIT)
 
 #ifdef CONFIG_PM_HARDWARE_IDENTITY_VERIFIED
-#define PM_BUILD_HARDWARE_VERIFIED true
+#define PM_BUILD_PZEM_LIVE_READS true
+#elif defined(CONFIG_PM_PZEM_LIVE_VALIDATION)
+#define PM_BUILD_PZEM_LIVE_READS true
 #else
-#define PM_BUILD_HARDWARE_VERIFIED false
+#define PM_BUILD_PZEM_LIVE_READS false
 #endif
 
 #ifdef CONFIG_PM_SIMULATED_METER
@@ -1687,7 +1699,18 @@ static void execute_command(pm_command_t *command)
         break;
     case PM_COMMAND_METER_SELF_TEST: {
         pm_meter_sample_t sample = {0};
-        result = pm_meter_read(&s_meter, &sample, 500U);
+        bool present = false;
+        result = pm_network_copy_live(&sample, &present);
+        const int64_t now_us = esp_timer_get_time();
+        const int64_t maximum_age_us = (int64_t)CONFIG_PM_METER_SAMPLE_MS * INT64_C(2000);
+        if (result == ESP_OK &&
+            (!present || sample.sample_monotonic_us <= 0 || now_us < sample.sample_monotonic_us ||
+             now_us - sample.sample_monotonic_us > maximum_age_us)) {
+            sample.status = PM_PZEM_TIMEOUT;
+            result = ESP_ERR_TIMEOUT;
+        } else if (result == ESP_OK && sample.status != PM_PZEM_OK) {
+            result = ESP_ERR_INVALID_RESPONSE;
+        }
         (void)snprintf(command->result_text, sizeof(command->result_text), "pzem_status=%s",
                        pm_pzem_status_name(sample.status));
         break;
@@ -2461,7 +2484,7 @@ void app_main(void)
     }
 
     error = pm_meter_create(&s_meter, PM_METER_PZEM004T_V4_CLASSIC,
-                            PM_BUILD_HARDWARE_VERIFIED, PM_BUILD_SIMULATED_METER);
+                            PM_BUILD_PZEM_LIVE_READS, PM_BUILD_SIMULATED_METER);
     if (error != ESP_OK) {
         set_degraded(PM_EVENT_METER_FAILED);
     }

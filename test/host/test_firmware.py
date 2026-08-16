@@ -326,7 +326,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "\n  attest_release:\n", 1
         )[0]
         wrapper = "/opt/esp/entrypoint.sh python"
-        self.assertEqual(build_release.count(wrapper), 7)
+        self.assertEqual(build_release.count(wrapper), 8)
         raw_python_commands = [
             line.strip()
             for line in build_release.splitlines()
@@ -400,6 +400,28 @@ class PersistenceSafetySourceTests(unittest.TestCase):
         self.assertIn("a.generation == b.generation && memcmp(&a, &b, sizeof(a)) != 0", ota)
         self.assertIn("static bool claim_ota_task", app)
         self.assertIn("result = claim_ota_task() ? ESP_OK : ESP_ERR_INVALID_STATE", app)
+
+    def test_authenticated_http_uses_bounded_response_header_events(self):
+        network = self._source("components/pm_network/pm_network.c")
+        ota = self._source("components/pm_ota/pm_ota.c")
+        capture = self._source("components/pm_protocol/pm_http_response.c")
+        self.assertNotIn("esp_http_client_get_header", network + ota)
+        self.assertEqual((network + ota).count("HTTP_EVENT_ON_HEADER"), 2)
+        self.assertEqual((network + ota).count("pm_http_response_capture_validate"), 2)
+        self.assertIn("PM_HTTP_REQUIRED_AUTH_MASK", capture)
+        self.assertIn("(capture->seen_mask & field) != 0U", capture)
+        self.assertIn("length >= capacity", capture)
+
+    def test_ota_requires_a_strict_semantic_version_upgrade(self):
+        ota = self._source("components/pm_ota/pm_ota.c")
+        policy = self._source("components/pm_ota/pm_ota_version.c")
+        network = self._source("components/pm_network/pm_network.c")
+        self.assertIn("pm_ota_version_require_upgrade(running->version, manifest->version)", ota)
+        self.assertIn('strncmp(cursor, "-rc.", 4U)', policy)
+        self.assertIn("wire_value > UINT8_MAX ? UINT8_MAX", self._source(
+            "components/pm_network/pm_command_envelope.c"
+        ))
+        self.assertIn("pm_command_attempt_from_json_number", network)
 
     def test_wifi_plaintext_stack_copy_is_zeroized(self):
         source = self._source("components/pm_network/pm_network.c")

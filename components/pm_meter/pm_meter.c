@@ -8,7 +8,7 @@
 
 static esp_err_t pzem_initialize(pm_meter_driver_t *driver)
 {
-    if (driver == NULL || !driver->hardware_identity_verified) {
+    if (driver == NULL || !driver->physical_reads_enabled) {
         return ESP_ERR_INVALID_STATE;
     }
     const uart_config_t config = {
@@ -34,7 +34,7 @@ static esp_err_t pzem_initialize(pm_meter_driver_t *driver)
 
 static esp_err_t pzem_read(pm_meter_driver_t *driver, pm_meter_sample_t *sample, uint32_t timeout_ms)
 {
-    if (driver == NULL || sample == NULL || !driver->hardware_identity_verified) {
+    if (driver == NULL || sample == NULL || !driver->physical_reads_enabled) {
         if (sample != NULL) {
             *sample = (pm_meter_sample_t){.status = PM_PZEM_NOT_VERIFIED};
         }
@@ -54,9 +54,9 @@ static esp_err_t pzem_read(pm_meter_driver_t *driver, pm_meter_sample_t *sample,
         *sample = (pm_meter_sample_t){.status = PM_PZEM_TIMEOUT, .sample_monotonic_us = esp_timer_get_time()};
         return ESP_ERR_TIMEOUT;
     }
-    sample->sample_monotonic_us = esp_timer_get_time();
     const pm_pzem_status_t status = pm_pzem_v4_classic_parse_response(driver->slave_address, response,
                                                                        (size_t)received, sample);
+    sample->sample_monotonic_us = esp_timer_get_time();
     return status == PM_PZEM_OK ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
 
@@ -102,7 +102,7 @@ static const pm_meter_driver_ops_t simulated_ops = {
     .abi_version = 1U,
 };
 
-esp_err_t pm_meter_create(pm_meter_driver_t *driver, pm_meter_variant_t variant, bool hardware_verified,
+esp_err_t pm_meter_create(pm_meter_driver_t *driver, pm_meter_variant_t variant, bool physical_reads_enabled,
                           bool simulated)
 {
     if (driver == NULL || variant != PM_METER_PZEM004T_V4_CLASSIC) {
@@ -112,7 +112,7 @@ esp_err_t pm_meter_create(pm_meter_driver_t *driver, pm_meter_variant_t variant,
         .ops = simulated ? &simulated_ops : &pzem_ops,
         .variant = variant,
         .slave_address = PM_PZEM_SLAVE_ADDRESS,
-        .hardware_identity_verified = hardware_verified,
+        .physical_reads_enabled = physical_reads_enabled,
         .simulated = simulated,
     };
     return driver->ops->initialize(driver);

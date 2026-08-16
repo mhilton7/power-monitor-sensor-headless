@@ -34,6 +34,20 @@ config PM_SIMULATED_METER
     bool "Use deterministic simulated meter"
     default n
 
+config PM_PZEM_LIVE_VALIDATION
+    bool "Poll the selected PZEM candidate in a non-production validation build"
+    default n
+    depends on PM_RELEASE_CANDIDATE
+    depends on PM_METER_VARIANT_PZEM004T_V4_CLASSIC
+    depends on !PM_HARDWARE_IDENTITY_VERIFIED
+    depends on !PM_PRODUCTION_RELEASE
+    depends on !PM_SIMULATED_METER
+    help
+        Enables real UART reads from the explicitly selected PZEM candidate
+        while physical certification remains pending. This is for collecting
+        marked-unit validation evidence and must never satisfy the stable
+        production hardware-identity gate.
+
 config PM_HEARTBEAT_SECONDS
     int "Heartbeat period in seconds"
     range 5 300

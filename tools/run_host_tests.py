@@ -37,6 +37,7 @@ def main() -> int:
         "unit_tests": result.testsRun,
         "unit_failures": len(result.failures),
         "unit_errors": len(result.errors),
+        "unit_skipped": len(result.skipped),
         "subprocess_failures": sum(item["returncode"] != 0 for item in subresults),
         "duration_seconds": round(time.time() - started, 3),
         "subresults": subresults,

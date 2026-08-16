@@ -22,7 +22,9 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "mbedtls/base64.h"
+#include "pm_command_envelope.h"
 #include "pm_diagnostics.h"
+#include "pm_http_response.h"
 #include "pm_protocol.h"
 
 #define PM_WIFI_CONNECTED_BIT BIT0
@@ -255,6 +257,18 @@ esp_err_t pm_network_publish_live(const pm_meter_sample_t *sample)
     taskENTER_CRITICAL(&s_live_lock);
     s_live = *sample;
     s_live_present = true;
+    taskEXIT_CRITICAL(&s_live_lock);
+    return ESP_OK;
+}
+
+esp_err_t pm_network_copy_live(pm_meter_sample_t *sample, bool *present)
+{
+    if (sample == NULL || present == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    taskENTER_CRITICAL(&s_live_lock);
+    *sample = s_live;
+    *present = s_live_present;
     taskEXIT_CRITICAL(&s_live_lock);
     return ESP_OK;
 }
@@ -907,9 +921,21 @@ esp_err_t pm_network_serialize_permanent_loss(const pm_storage_health_t *storage
     return rendered;
 }
 
+static esp_err_t capture_response_header_event(esp_http_client_event_t *event)
+{
+    if (event == NULL || event->user_data == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (event->event_id != HTTP_EVENT_ON_HEADER) {
+        return ESP_OK;
+    }
+    return pm_http_response_capture_header((pm_http_response_capture_t *)event->user_data,
+                                           event->header_key, event->header_value);
+}
+
 static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_snapshot_t *auth_snapshot,
-                                const char *method, const char *path, const char *body,
-                                char *response, size_t response_size, int *status)
+                                 const char *method, const char *path, const char *body,
+                                 char *response, size_t response_size, int *status)
 {
     if (context == NULL || auth_snapshot == NULL || method == NULL || path == NULL || body == NULL ||
         response == NULL || status == NULL) {
@@ -943,6 +969,8 @@ static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_s
         pm_network_clear_auth_snapshot(auth_snapshot);
         return error;
     }
+    pm_http_response_capture_t response_headers;
+    pm_http_response_capture_init(&response_headers);
     const esp_http_client_config_t config = {
         .url = url,
         .cert_pem = auth_snapshot->ca_pem,
@@ -951,6 +979,8 @@ static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_s
         .buffer_size_tx = 2048,
         .keep_alive_enable = true,
         .disable_auto_redirect = true,
+        .event_handler = capture_response_header_event,
+        .user_data = &response_headers,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
@@ -970,7 +1000,6 @@ static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_s
         error = ESP_ERR_HTTP_WRITE_DATA;
     }
     int64_t content_length = -1;
-    pm_response_auth_headers_t response_auth = {0};
     if (error == ESP_OK) {
         content_length = esp_http_client_fetch_headers(client);
         *status = esp_http_client_get_status_code(client);
@@ -980,30 +1009,8 @@ static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_s
             error = ESP_ERR_INVALID_SIZE;
         }
     }
-    static const struct {
-        const char *header;
-        size_t offset;
-        size_t capacity;
-    } response_headers[] = {
-        {"X-PM-Protocol", offsetof(pm_response_auth_headers_t, protocol), sizeof(response_auth.protocol)},
-        {"X-PM-Device-ID", offsetof(pm_response_auth_headers_t, device_id), sizeof(response_auth.device_id)},
-        {"X-PM-Timestamp", offsetof(pm_response_auth_headers_t, timestamp), sizeof(response_auth.timestamp)},
-        {"X-PM-Nonce", offsetof(pm_response_auth_headers_t, nonce), sizeof(response_auth.nonce)},
-        {"X-PM-Content-SHA256", offsetof(pm_response_auth_headers_t, content_sha256),
-         sizeof(response_auth.content_sha256)},
-        {"X-PM-Signature", offsetof(pm_response_auth_headers_t, signature), sizeof(response_auth.signature)},
-    };
     if (error == ESP_OK && *status >= 200 && *status < 300) {
-        for (size_t i = 0U; i < sizeof(response_headers) / sizeof(response_headers[0]); ++i) {
-            char *value = NULL;
-            char *destination = (char *)&response_auth + response_headers[i].offset;
-            if (esp_http_client_get_header(client, response_headers[i].header, &value) != ESP_OK || value == NULL ||
-                strlen(value) >= response_headers[i].capacity) {
-                error = ESP_ERR_INVALID_RESPONSE;
-                break;
-            }
-            memcpy(destination, value, strlen(value) + 1U);
-        }
+        error = pm_http_response_capture_validate(&response_headers, false);
     }
     size_t used = 0U;
     while (error == ESP_OK && used + 1U < response_size) {
@@ -1025,7 +1032,7 @@ static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_s
         error = ESP_ERR_INVALID_RESPONSE;
     } else if (error == ESP_OK) {
         error = pm_verify_response(auth_snapshot->server_to_device_key, auth_snapshot->device_id_text,
-                                   path, NULL, utc_ms, &response_auth,
+                                   path, NULL, utc_ms, &response_headers.auth,
                                    (const uint8_t *)response, used, &context->response_nonce_cache);
     }
     context->last_request_error = pm_network_classify_error(error, *status);
@@ -1166,6 +1173,7 @@ static void parse_commands(pm_network_context_t *context, const char *response)
     const cJSON *item = NULL;
     cJSON_ArrayForEach(item, commands) {
         pm_command_t command = {0};
+        uint8_t normalized_attempt = 0U;
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "command_id");
         const cJSON *idempotency = cJSON_GetObjectItemCaseSensitive(item, "idempotency_key");
         const cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "command_type");
@@ -1177,8 +1185,8 @@ static void parse_commands(pm_network_context_t *context, const char *response)
         if (!cJSON_IsString(id) || strlen(id->valuestring) != PM_COMMAND_ID_MAX || !cJSON_IsString(idempotency) ||
             strlen(idempotency->valuestring) == 0U || strlen(idempotency->valuestring) > PM_IDEMPOTENCY_KEY_MAX ||
             !cJSON_IsString(type) || !cJSON_IsString(not_before) || !cJSON_IsString(expires) ||
-            !cJSON_IsNumber(attempt) || attempt->valuedouble < 0.0 || attempt->valuedouble > 255.0 ||
-            attempt->valuedouble != (double)(uint8_t)attempt->valuedouble ||
+            !cJSON_IsNumber(attempt) ||
+            !pm_command_attempt_from_json_number(attempt->valuedouble, &normalized_attempt) ||
             !(cJSON_IsNull(capability) || cJSON_IsString(capability)) || !cJSON_IsObject(payload) ||
             !pm_command_type_from_name(type->valuestring, &command.type) ||
             !capability_supported(cJSON_IsString(capability) ? capability->valuestring : NULL) ||
@@ -1190,7 +1198,7 @@ static void parse_commands(pm_network_context_t *context, const char *response)
         (void)snprintf(command.command_id, sizeof(command.command_id), "%s", id->valuestring);
         (void)snprintf(command.idempotency_key, sizeof(command.idempotency_key), "%s", idempotency->valuestring);
         command.issued_utc_ms = (int64_t)time(NULL) * 1000;
-        command.attempt = (uint8_t)attempt->valuedouble;
+        command.attempt = normalized_attempt;
         char *serialized = cJSON_PrintUnformatted(payload);
         if (serialized == NULL || strlen(serialized) > PM_COMMAND_PAYLOAD_MAX) {
             if (serialized != NULL) {
@@ -1220,11 +1228,11 @@ static esp_err_t send_heartbeat(pm_network_context_t *context, pm_network_io_wor
 {
     pm_meter_sample_t live = {0};
     bool present = false;
-    taskENTER_CRITICAL(&s_live_lock);
-    live = s_live;
-    present = s_live_present;
-    taskEXIT_CRITICAL(&s_live_lock);
-    esp_err_t error = pm_commands_lock();
+    esp_err_t error = pm_network_copy_live(&live, &present);
+    if (error != ESP_OK) {
+        return error;
+    }
+    error = pm_commands_lock();
     if (error == ESP_OK) {
         error = pm_network_serialize_heartbeat(context, &live, present, io->body, sizeof(io->body));
         pm_commands_unlock();
