@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "pm_commands.h"
 #include "pm_config.h"
 #include "pm_meter.h"
@@ -56,6 +59,17 @@ typedef enum {
     PM_HEALTH_OTA_ROLLED_BACK = 1U << 3,
 } pm_network_health_flag_t;
 
+/* Immutable credentials captured for exactly one outbound HTTP/OTA operation.
+ * The live context mutex is never held while performing network or flash I/O. */
+typedef struct {
+    char server_origin[PM_CONFIG_ORIGIN_MAX + 1U];
+    char ca_pem[PM_CONFIG_CA_MAX + 1U];
+    char device_id_text[37];
+    uint8_t device_to_server_key[32];
+    uint8_t server_to_device_key[32];
+    uint32_t config_generation;
+} pm_network_auth_snapshot_t;
+
 typedef struct {
     pm_config_t config;
     char device_id_text[37];
@@ -73,6 +87,10 @@ typedef struct {
     uint32_t health_flags;
     uint64_t permanent_loss_reported_through;
     pm_tls_error_class_t last_request_error;
+    StaticSemaphore_t credential_mutex_storage;
+    SemaphoreHandle_t credential_mutex;
+    EventGroupHandle_t start_gate;
+    EventBits_t start_bit;
 } pm_network_context_t;
 
 void pm_network_scheduler_init(pm_network_scheduler_t *scheduler, int64_t now_us, uint32_t heartbeat_seconds);
@@ -89,6 +107,9 @@ esp_err_t pm_network_serialize_heartbeat(pm_network_context_t *context, const pm
                                         bool sample_present, char *body, size_t body_size);
 esp_err_t pm_network_serialize_reading_batch(const pm_storage_batch_t *batch, char *body, size_t body_size);
 esp_err_t pm_network_serialize_permanent_loss(const pm_storage_health_t *storage, char *body, size_t body_size);
+esp_err_t pm_network_apply_runtime_config(pm_network_context_t *context, const pm_config_t *config);
+esp_err_t pm_network_capture_auth_snapshot(pm_network_context_t *context, pm_network_auth_snapshot_t *snapshot);
+void pm_network_clear_auth_snapshot(pm_network_auth_snapshot_t *snapshot);
 esp_err_t pm_network_start(pm_network_context_t *context);
 esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_config_t *candidate,
                                        const char *enrollment_token, void *context);

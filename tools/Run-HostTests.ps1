@@ -11,5 +11,6 @@ $pythonCandidates = @(
 )
 $python = $pythonCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
 if (-not $python) { throw "A Python 3.11 runtime was not found." }
+& (Join-Path $repo "test/powershell/ProvisioningUx.Tests.ps1")
 & $python (Join-Path $repo "tools/run_host_tests.py")
 if ($LASTEXITCODE -ne 0) { throw "Firmware host tests failed with exit code $LASTEXITCODE" }

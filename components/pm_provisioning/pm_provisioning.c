@@ -6,11 +6,36 @@
 #include "cJSON.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "pm_protocol.h"
+
+typedef struct {
+    pm_provisioning_session_t *session;
+    char line[PM_COM_LINE_MAX];
+    char response[PM_COM_LINE_MAX];
+} pm_usb_task_context_t;
+
+static void secure_zero(void *value, size_t length)
+{
+    volatile uint8_t *bytes = (volatile uint8_t *)value;
+    while (length-- > 0U) {
+        *bytes++ = 0U;
+    }
+}
+
+static void *allocate_task_context(size_t size)
+{
+    void *context = heap_caps_calloc(1U, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (context == NULL) {
+        context = heap_caps_calloc(1U, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return context;
+}
 
 static bool copy_json_string(const cJSON *object, const char *name, char *destination, size_t capacity,
                              bool required)
@@ -39,6 +64,28 @@ static bool get_u32(const cJSON *object, const char *name, uint32_t *destination
     return true;
 }
 
+static void wipe_json_string(cJSON *object, const char *name)
+{
+    cJSON *value = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (cJSON_IsString(value) && value->valuestring != NULL) {
+        secure_zero(value->valuestring, strlen(value->valuestring));
+    }
+}
+
+static void secure_delete_request(cJSON *request)
+{
+    if (request != NULL) {
+        cJSON *config = cJSON_GetObjectItemCaseSensitive(request, "config");
+        if (cJSON_IsObject(config)) {
+            wipe_json_string(config, "wifi_password");
+            wipe_json_string(config, "enrollment_token");
+            wipe_json_string(config, "ca_pem");
+        }
+        wipe_json_string(request, "confirmation_token");
+    }
+    cJSON_Delete(request);
+}
+
 static esp_err_t render_response(cJSON *root, char *response, size_t response_size)
 {
     if (root == NULL || response == NULL || response_size == 0U) {
@@ -46,6 +93,7 @@ static esp_err_t render_response(cJSON *root, char *response, size_t response_si
         return ESP_ERR_INVALID_ARG;
     }
     const bool printed = cJSON_PrintPreallocated(root, response, (int)response_size, false);
+    wipe_json_string(root, "confirmation_token");
     cJSON_Delete(root);
     if (!printed) {
         return ESP_ERR_INVALID_SIZE;
@@ -74,7 +122,8 @@ static cJSON *base_response(const cJSON *request, bool ok)
 
 void pm_provisioning_session_init(pm_provisioning_session_t *session, const pm_config_t *active,
                                   bool physically_authorized, pm_provisioning_test_fn test,
-                                  pm_factory_reset_fn factory_reset, void *callback_context)
+                                  pm_factory_reset_fn factory_reset, pm_safe_reboot_prepare_fn safe_reboot_prepare,
+                                  void *callback_context)
 {
     if (session == NULL) {
         return;
@@ -86,53 +135,76 @@ void pm_provisioning_session_init(pm_provisioning_session_t *session, const pm_c
     session->physically_authorized = physically_authorized;
     session->test = test;
     session->factory_reset = factory_reset;
+    session->safe_reboot_prepare = safe_reboot_prepare;
     session->callback_context = callback_context;
+}
+
+static void clear_candidate_state(pm_provisioning_session_t *session)
+{
+    if (session == NULL) {
+        return;
+    }
+    pm_config_abort(&session->transaction);
+    secure_zero(&session->candidate, sizeof(session->candidate));
+    secure_zero(session->enrollment_token, sizeof(session->enrollment_token));
+    session->candidate_present = false;
+    session->tests_passed = false;
 }
 
 static bool parse_candidate(pm_provisioning_session_t *session, const cJSON *config)
 {
-    if (session == NULL || !cJSON_IsObject(config)) {
+    if (session == NULL) {
         return false;
     }
-    pm_config_t candidate = session->active;
-    candidate.schema_version = PM_CONFIG_SCHEMA_VERSION;
-    candidate.generation++;
+    clear_candidate_state(session);
+    if (!cJSON_IsObject(config)) {
+        return false;
+    }
+    if (session->active.generation == UINT32_MAX) {
+        return false;
+    }
+    session->candidate = session->active;
+    pm_config_t *candidate = &session->candidate;
+    candidate->schema_version = PM_CONFIG_SCHEMA_VERSION;
+    candidate->generation++;
     uint32_t ipv4_mode = 0U;
     uint32_t ct_rating = 0U;
-    if (!copy_json_string(config, "friendly_name", candidate.friendly_name, sizeof(candidate.friendly_name), true) ||
-        !copy_json_string(config, "wifi_ssid", candidate.wifi_ssid, sizeof(candidate.wifi_ssid), true) ||
-        !copy_json_string(config, "wifi_password", candidate.wifi_password, sizeof(candidate.wifi_password), true) ||
-        !copy_json_string(config, "server_origin", candidate.server_origin, sizeof(candidate.server_origin), true) ||
-        !copy_json_string(config, "ca_pem", candidate.ca_pem, sizeof(candidate.ca_pem), true) ||
-        !copy_json_string(config, "timezone", candidate.timezone, sizeof(candidate.timezone), true) ||
+    if (!copy_json_string(config, "friendly_name", candidate->friendly_name, sizeof(candidate->friendly_name), true) ||
+        !copy_json_string(config, "wifi_ssid", candidate->wifi_ssid, sizeof(candidate->wifi_ssid), true) ||
+        !copy_json_string(config, "wifi_password", candidate->wifi_password, sizeof(candidate->wifi_password), true) ||
+        !copy_json_string(config, "server_origin", candidate->server_origin, sizeof(candidate->server_origin), true) ||
+        !copy_json_string(config, "ca_pem", candidate->ca_pem, sizeof(candidate->ca_pem), true) ||
+        !copy_json_string(config, "timezone", candidate->timezone, sizeof(candidate->timezone), true) ||
         !copy_json_string(config, "enrollment_token", session->enrollment_token, sizeof(session->enrollment_token), true) ||
         !get_u32(config, "ipv4_mode", &ipv4_mode, true) || !get_u32(config, "ct_rating_a", &ct_rating, true) ||
         ipv4_mode > PM_IPV4_STATIC || ct_rating == 0U || ct_rating > 100U) {
-        return false;
+        goto invalid;
     }
-    candidate.ipv4_mode = (pm_ipv4_mode_t)ipv4_mode;
-    candidate.ct_rating_a = (uint16_t)ct_rating;
+    candidate->ipv4_mode = (pm_ipv4_mode_t)ipv4_mode;
+    candidate->ct_rating_a = (uint16_t)ct_rating;
     const cJSON *variant = cJSON_GetObjectItemCaseSensitive(config, "pzem_variant");
     if (!cJSON_IsString(variant) || strcmp(variant->valuestring, "pzem-004t-v4-classic") != 0) {
-        return false;
+        goto invalid;
     }
-    candidate.meter_variant = PM_METER_PZEM004T_V4_CLASSIC;
-    if (candidate.ipv4_mode == PM_IPV4_STATIC &&
-        (!get_u32(config, "ipv4_address", &candidate.ipv4_address, true) ||
-         !get_u32(config, "ipv4_gateway", &candidate.ipv4_gateway, true) ||
-         !get_u32(config, "ipv4_netmask", &candidate.ipv4_netmask, true) ||
-         !get_u32(config, "dns_primary", &candidate.dns_primary, true) ||
-         !get_u32(config, "dns_secondary", &candidate.dns_secondary, false))) {
-        return false;
+    candidate->meter_variant = PM_METER_PZEM004T_V4_CLASSIC;
+    if (candidate->ipv4_mode == PM_IPV4_STATIC &&
+        (!get_u32(config, "ipv4_address", &candidate->ipv4_address, true) ||
+         !get_u32(config, "ipv4_gateway", &candidate->ipv4_gateway, true) ||
+         !get_u32(config, "ipv4_netmask", &candidate->ipv4_netmask, true) ||
+         !get_u32(config, "dns_primary", &candidate->dns_primary, true) ||
+         !get_u32(config, "dns_secondary", &candidate->dns_secondary, false))) {
+        goto invalid;
     }
-    candidate.crc32 = pm_crc32_ieee(&candidate, offsetof(pm_config_t, crc32));
-    if (pm_config_validate(&candidate, true) != ESP_OK) {
-        return false;
+    candidate->crc32 = pm_crc32_ieee(candidate, offsetof(pm_config_t, crc32));
+    if (pm_config_validate(candidate, true) != ESP_OK) {
+        goto invalid;
     }
-    session->candidate = candidate;
     session->candidate_present = true;
-    session->tests_passed = false;
     return true;
+
+invalid:
+    clear_candidate_state(session);
+    return false;
 }
 
 static void fingerprint(const uint8_t *value, size_t length, char output[17])
@@ -160,12 +232,13 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
     if (!cJSON_IsString(protocol) || strcmp(protocol->valuestring, PM_COM_PROTOCOL) != 0 || !cJSON_IsString(operation)) {
         cJSON *out = base_response(request, false);
         cJSON_AddStringToObject(out, "error", "unsupported_protocol_or_operation");
-        cJSON_Delete(request);
+        secure_delete_request(request);
         return render_response(out, response, response_size);
     }
 
     cJSON *out = base_response(request, true);
     esp_err_t result = ESP_OK;
+    bool request_reboot = false;
     if (strcmp(operation->valuestring, "hello") == 0 || strcmp(operation->valuestring, "status") == 0) {
         char id_fingerprint[17];
         fingerprint(session->active.device_id, sizeof(session->active.device_id), id_fingerprint);
@@ -177,6 +250,7 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
     } else if (strcmp(operation->valuestring, "begin_config") == 0) {
         const cJSON *config = cJSON_GetObjectItemCaseSensitive(request, "config");
         if (!parse_candidate(session, config) || pm_config_begin(&session->candidate, &session->transaction) != ESP_OK) {
+            clear_candidate_state(session);
             cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
             cJSON_AddStringToObject(out, "error", "candidate_invalid_or_write_failed");
             result = ESP_ERR_INVALID_ARG;
@@ -184,6 +258,7 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
             cJSON_AddStringToObject(out, "stage", "readback_verified");
         }
     } else if (strcmp(operation->valuestring, "test_config") == 0) {
+        session->tests_passed = false;
         if (!session->candidate_present || session->test == NULL) {
             result = ESP_ERR_INVALID_STATE;
         } else {
@@ -205,6 +280,7 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
             session->tests_passed = result == ESP_OK;
         }
         if (result != ESP_OK) {
+            clear_candidate_state(session);
             cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
             cJSON_AddStringToObject(out, "error", "configuration_test_failed");
             cJSON_AddNumberToObject(out, "code", result);
@@ -215,18 +291,15 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
         result = session->tests_passed ? pm_config_commit(&session->transaction) : ESP_ERR_INVALID_STATE;
         if (result == ESP_OK) {
             session->active = session->candidate;
-            memset(session->enrollment_token, 0, sizeof(session->enrollment_token));
+            clear_candidate_state(session);
             cJSON_AddStringToObject(out, "stage", "committed");
         } else {
+            clear_candidate_state(session);
             cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
             cJSON_AddStringToObject(out, "error", "commit_requires_successful_tests");
         }
     } else if (strcmp(operation->valuestring, "rollback_config") == 0) {
-        pm_config_abort(&session->transaction);
-        memset(&session->candidate, 0, sizeof(session->candidate));
-        memset(session->enrollment_token, 0, sizeof(session->enrollment_token));
-        session->candidate_present = false;
-        session->tests_passed = false;
+        clear_candidate_state(session);
         cJSON_AddStringToObject(out, "stage", "prior_config_retained");
     } else if (strcmp(operation->valuestring, "factory_reset_prepare") == 0) {
         if (!session->physically_authorized) {
@@ -238,6 +311,7 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
             pm_hex_lower(session->factory_token, sizeof(session->factory_token), token, sizeof(token));
             cJSON_AddStringToObject(out, "confirmation_token", token);
             cJSON_AddStringToObject(out, "warning", "factory reset revokes configuration; sequence identity is preserved unless separately authorized");
+            secure_zero(token, sizeof(token));
         }
         if (result != ESP_OK) {
             cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
@@ -259,44 +333,119 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
             cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
             cJSON_AddStringToObject(out, "error", "factory_reset_rejected");
         }
+        secure_zero(expected, sizeof(expected));
+        secure_zero(session->factory_token, sizeof(session->factory_token));
+        session->factory_token_expires_us = 0;
     } else if (strcmp(operation->valuestring, "safe_reboot") == 0) {
-        cJSON_AddStringToObject(out, "stage", "accepted_awaiting_reboot");
+        clear_candidate_state(session);
+        if (session->safe_reboot_prepare == NULL) {
+            result = ESP_ERR_INVALID_STATE;
+            cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
+            cJSON_AddStringToObject(out, "error", "safe_reboot_unavailable");
+        } else {
+            result = session->safe_reboot_prepare(session->callback_context);
+            if (result == ESP_OK) {
+                request_reboot = true;
+                cJSON_AddStringToObject(out, "stage", "storage_flushed_awaiting_reboot");
+            } else {
+                cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
+                cJSON_AddStringToObject(out, "error", "storage_flush_failed_no_reboot");
+                cJSON_AddNumberToObject(out, "code", result);
+            }
+        }
     } else {
         cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
         cJSON_AddStringToObject(out, "error", "unknown_operation");
         result = ESP_ERR_NOT_SUPPORTED;
     }
-    cJSON_Delete(request);
+    secure_delete_request(request);
     const esp_err_t render = render_response(out, response, response_size);
+    if (render == ESP_OK && request_reboot) {
+        session->reboot_requested = true;
+    }
     return render == ESP_OK ? result : render;
+}
+
+pm_com_frame_result_t pm_provisioning_framer_push(pm_com_framer_t *framer, uint8_t byte,
+                                                   char *line, size_t line_capacity)
+{
+    if (framer == NULL || line == NULL || line_capacity < 2U) {
+        return PM_COM_FRAME_NONE;
+    }
+    if (byte == '\n') {
+        if (framer->discarding_oversized_line) {
+            secure_zero(line, line_capacity);
+            framer->used = 0U;
+            framer->discarding_oversized_line = false;
+            return PM_COM_FRAME_NONE;
+        }
+        line[framer->used] = '\0';
+        framer->used = 0U;
+        return PM_COM_FRAME_READY;
+    }
+    if (byte == '\r' || framer->discarding_oversized_line) {
+        return PM_COM_FRAME_NONE;
+    }
+    if (framer->used + 1U < line_capacity) {
+        line[framer->used++] = (char)byte;
+        return PM_COM_FRAME_NONE;
+    }
+    secure_zero(line, line_capacity);
+    framer->used = 0U;
+    framer->discarding_oversized_line = true;
+    return PM_COM_FRAME_OVERSIZED;
+}
+
+esp_err_t pm_provisioning_prepare_reboot_barrier(bool storage_worker_available,
+                                                  pm_safe_reboot_flush_fn flush, void *context,
+                                                  uint32_t timeout_ms)
+{
+    if (!storage_worker_available) {
+        /* Isolated provisioning starts no journal producers, so there is no
+         * volatile storage work to drain when the worker never started. */
+        return ESP_OK;
+    }
+    return flush != NULL && timeout_ms > 0U ? flush(context, timeout_ms) : ESP_ERR_INVALID_ARG;
+}
+
+bool pm_provisioning_reboot_tx_complete(bool reboot_requested, size_t response_length,
+                                        int written, esp_err_t drain_result)
+{
+    return reboot_requested && response_length > 0U && written == (int)response_length &&
+           drain_result == ESP_OK;
 }
 
 static void usb_task(void *context)
 {
-    pm_provisioning_session_t *session = (pm_provisioning_session_t *)context;
-    char line[PM_COM_LINE_MAX];
-    char response[PM_COM_LINE_MAX];
-    size_t used = 0U;
+    pm_usb_task_context_t *task = (pm_usb_task_context_t *)context;
+    pm_com_framer_t framer = {0};
     for (;;) {
         uint8_t byte = 0U;
         const int read = usb_serial_jtag_read_bytes(&byte, 1U, pdMS_TO_TICKS(250));
         if (read <= 0) {
             continue;
         }
-        if (byte == '\n') {
-            line[used] = '\0';
-            (void)pm_provisioning_handle_line(session, line, response, sizeof(response));
-            (void)usb_serial_jtag_write_bytes(response, strlen(response), pdMS_TO_TICKS(1000));
-            memset(line, 0, used);
-            used = 0U;
-        } else if (byte != '\r') {
-            if (used + 1U < sizeof(line)) {
-                line[used++] = (char)byte;
-            } else {
-                static const char error[] = "{\"protocol\":\"pm-com/1.0.0\",\"id\":\"invalid\",\"ok\":false,\"error\":\"line_too_large\"}\n";
-                (void)usb_serial_jtag_write_bytes(error, sizeof(error) - 1U, pdMS_TO_TICKS(1000));
-                used = 0U;
+        const pm_com_frame_result_t frame =
+            pm_provisioning_framer_push(&framer, byte, task->line, sizeof(task->line));
+        if (frame == PM_COM_FRAME_READY) {
+            task->response[0] = '\0';
+            (void)pm_provisioning_handle_line(task->session, task->line, task->response, sizeof(task->response));
+            const size_t response_length = strlen(task->response);
+            const bool reboot_after_response = task->session->reboot_requested;
+            task->session->reboot_requested = false;
+            const int written = usb_serial_jtag_write_bytes(task->response, response_length, pdMS_TO_TICKS(1000));
+            const esp_err_t drain_result = usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000));
+            const bool reboot_now = pm_provisioning_reboot_tx_complete(
+                reboot_after_response, response_length, written, drain_result);
+            secure_zero(task->line, sizeof(task->line));
+            secure_zero(task->response, sizeof(task->response));
+            if (reboot_now) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                esp_restart();
             }
+        } else if (frame == PM_COM_FRAME_OVERSIZED) {
+            static const char error[] = "{\"protocol\":\"pm-com/1.0.0\",\"id\":\"invalid\",\"ok\":false,\"error\":\"line_too_large\"}\n";
+            (void)usb_serial_jtag_write_bytes(error, sizeof(error) - 1U, pdMS_TO_TICKS(1000));
         }
     }
 }
@@ -306,13 +455,29 @@ esp_err_t pm_provisioning_start_usb(pm_provisioning_session_t *session)
     if (session == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    pm_usb_task_context_t *task = (pm_usb_task_context_t *)allocate_task_context(sizeof(*task));
+    if (task == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    task->session = session;
     const usb_serial_jtag_driver_config_t config = {
         .tx_buffer_size = 1024U,
         .rx_buffer_size = PM_COM_LINE_MAX,
     };
     esp_err_t error = usb_serial_jtag_driver_install((usb_serial_jtag_driver_config_t *)&config);
     if (error != ESP_OK && error != ESP_ERR_INVALID_STATE) {
+        secure_zero(task, sizeof(*task));
+        heap_caps_free(task);
         return error;
     }
-    return xTaskCreate(usb_task, "pm_usb_recovery", 8192U, session, 6U, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    const bool driver_installed_here = error == ESP_OK;
+    if (xTaskCreate(usb_task, "pm_usb_recovery", 16384U, task, 6U, NULL) != pdPASS) {
+        if (driver_installed_here) {
+            (void)usb_serial_jtag_driver_uninstall();
+        }
+        secure_zero(task, sizeof(*task));
+        heap_caps_free(task);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }

@@ -78,13 +78,28 @@ typedef struct {
     uint32_t crc32;
 } pm_command_ledger_t;
 
+typedef enum {
+    PM_COMMAND_BOOT_IGNORE = 0,
+    PM_COMMAND_BOOT_REQUEUE,
+    PM_COMMAND_BOOT_FAIL_INTERRUPTED,
+    PM_COMMAND_BOOT_COMPLETE_REBOOT,
+    PM_COMMAND_BOOT_COMPLETE_WAKE,
+    PM_COMMAND_BOOT_RECONCILE_OTA,
+} pm_command_boot_action_t;
+
 esp_err_t pm_commands_load(pm_command_ledger_t *ledger);
+esp_err_t pm_commands_lock(void);
+void pm_commands_unlock(void);
 esp_err_t pm_command_accept(pm_command_ledger_t *ledger, const pm_command_t *incoming, int64_t now_utc_ms,
                             pm_command_t **stored, bool *duplicate);
 esp_err_t pm_command_transition(pm_command_ledger_t *ledger, pm_command_t *command, pm_command_state_t state,
                                 uint8_t progress_percent, int32_t result_code);
 esp_err_t pm_command_acknowledge_result(pm_command_ledger_t *ledger, const char *command_id);
 esp_err_t pm_command_zeroize_payload(pm_command_ledger_t *ledger, pm_command_t *command);
+pm_command_boot_action_t pm_command_boot_action(const pm_command_t *command);
+esp_err_t pm_command_reconcile_boot(pm_command_ledger_t *ledger, pm_command_t *command,
+                                    pm_command_state_t state, int32_t result_code,
+                                    const char *result_text);
 const char *pm_command_type_name(pm_command_type_t type);
 const char *pm_command_state_name(pm_command_state_t state);
 bool pm_command_type_from_name(const char *name, pm_command_type_t *type);

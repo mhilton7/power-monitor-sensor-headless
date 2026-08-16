@@ -19,6 +19,7 @@ extern "C" {
 #define PM_CONFIG_TIMEZONE_MAX 64U
 #define PM_CONFIG_SECRET_MAX 32U
 #define PM_CONFIG_DEVICE_ID_LEN 16U
+#define PM_CONFIG_CONTENT_HASH_LEN 32U
 
 typedef enum {
     PM_IPV4_DHCP = 0,
@@ -68,7 +69,9 @@ typedef enum {
 typedef struct {
     pm_config_stage_t stage;
     uint32_t candidate_generation;
+    uint32_t transaction_id;
     char candidate_slot;
+    uint8_t candidate_sha256[PM_CONFIG_CONTENT_HASH_LEN];
 } pm_config_transaction_t;
 
 uint32_t pm_crc32_ieee(const void *data, size_t length);

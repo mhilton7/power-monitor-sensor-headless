@@ -34,6 +34,31 @@ jobs:
           components/pm_measurement/pm_measurement.c components/pm_storage/pm_journal.c
           components/pm_config/pm_state.c
           -o "$RUNNER_TEMP/test_core" && "$RUNNER_TEMP/test_core"
+      - name: Compile and run command-ledger A/B recovery regression
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Wframe-larger-than=3072 \
+          -Itest/host/stubs -Icomponents/pm_commands/include -Icomponents/pm_config/include \
+          -Icomponents/pm_protocol/include -c components/pm_commands/pm_commands.c \
+          -o "$RUNNER_TEMP/pm_commands.o"
+          cc -std=c11 -Wall -Wextra -Werror \
+          -Itest/host/stubs -Icomponents/pm_commands/include -Icomponents/pm_config/include \
+          -Icomponents/pm_protocol/include test/host/test_pm_commands.c "$RUNNER_TEMP/pm_commands.o" \
+          -o "$RUNNER_TEMP/test_pm_commands" && "$RUNNER_TEMP/test_pm_commands"
+      - name: Compile and run configuration transaction regression
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Wframe-larger-than=3072 \
+          -Itest/host/stubs -Icomponents/pm_config/include -Icomponents/pm_protocol/include \
+          -c components/pm_config/pm_config.c -o "$RUNNER_TEMP/pm_config.o"
+          cc -std=c11 -Wall -Wextra -Werror \
+          -Itest/host/stubs -Icomponents/pm_config/include -Icomponents/pm_protocol/include \
+          test/host/test_pm_config.c "$RUNNER_TEMP/pm_config.o" \
+          -o "$RUNNER_TEMP/test_pm_config" && "$RUNNER_TEMP/test_pm_config"
+      - name: Compile and run atomic runtime task-start regression
+        run: >-
+          cc -std=c11 -Wall -Wextra -Werror
+          -Itest/host/stubs -Imain
+          test/host/test_runtime_startup.c main/runtime_startup.c
+          -o "$RUNNER_TEMP/test_runtime_startup" && "$RUNNER_TEMP/test_runtime_startup"
       - name: Run production pure-C tests under ASan and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
@@ -70,8 +95,24 @@ jobs:
           /opt/esp/entrypoint.sh idf.py -B build-ci -D 'SDKCONFIG=build-ci/sdkconfig'
           -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.release-candidate'
           set-target esp32s3 build
+      - name: Compile and run provisioning state-machine regression
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -Wframe-larger-than=3072 \
+          -Itest/host/stubs -Icomponents/pm_provisioning/include -Icomponents/pm_config/include \
+          -Icomponents/pm_protocol/include -Imanaged_components/espressif__cjson/cJSON \
+          -c components/pm_provisioning/pm_provisioning.c -o /tmp/pm_provisioning.o
+          cc -std=c11 -Wall -Wextra -Werror \
+          -Itest/host/stubs -Icomponents/pm_provisioning/include -Icomponents/pm_config/include \
+          -Icomponents/pm_protocol/include -Imanaged_components/espressif__cjson/cJSON \
+          test/host/test_pm_provisioning.c managed_components/espressif__cjson/cJSON/cJSON.c \
+          /tmp/pm_provisioning.o -o /tmp/test_pm_provisioning
+          /tmp/test_pm_provisioning
       - name: Enforce OTA slot margin
         run: test "$(stat -c %s build-ci/power-monitor-sensor-headless.bin)" -lt 7077888
+      - name: Audit every first-party object stack frame
+        run: >-
+          python tools/audit_stack_frames.py --build-dir build-ci
+          --json build-ci/stack-frame-audit.json --threshold 3072
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: firmware-ci-${{ github.sha }}
@@ -81,6 +122,7 @@ jobs:
             build-ci/power-monitor-sensor-headless.bin
             build-ci/power-monitor-sensor-headless.elf
             build-ci/power-monitor-sensor-headless.map
+            build-ci/stack-frame-audit.json
             build-ci/bootloader/bootloader.bin
             build-ci/partition_table/partition-table.bin
             build-ci/ota_data_initial.bin
@@ -107,3 +149,6 @@ jobs:
             $allErrors += $fileErrors
           }
           if ($allErrors.Count) { $allErrors | Format-List; exit 1 }
+      - name: Run provisioning UX regression
+        shell: pwsh
+        run: ./test/powershell/ProvisioningUx.Tests.ps1

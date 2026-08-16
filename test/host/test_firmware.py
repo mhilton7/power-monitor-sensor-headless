@@ -11,6 +11,7 @@ from pathlib import Path
 from pm_model import (
     ABStore,
     CommandLedger,
+    command_boot_action,
     Interval,
     Journal,
     Scheduler,
@@ -237,6 +238,40 @@ class NetworkAndCommandTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "terminal_transition"):
             ledger.transition("c", "running")
 
+    def test_boot_recovery_policy_is_explicit_for_every_active_state(self):
+        replayable = {
+            "sync_now",
+            "diagnostics_snapshot",
+            "network_self_test",
+            "meter_self_test",
+            "storage_self_test",
+        }
+        all_types = replayable | {
+            "reboot",
+            "maintenance_sleep",
+            "apply_configuration",
+            "rotate_device_credentials",
+            "ota_install",
+            "format_storage_commit",
+            "data_reset_commit",
+        }
+        for command_type in all_types:
+            self.assertEqual(
+                command_boot_action(command_type, "accepted"),
+                "requeue" if command_type in replayable else "fail_interrupted",
+            )
+            expected_running = (
+                "reconcile_ota" if command_type == "ota_install"
+                else "requeue" if command_type in replayable
+                else "fail_interrupted"
+            )
+            self.assertEqual(command_boot_action(command_type, "running"), expected_running)
+        self.assertEqual(command_boot_action("reboot", "awaiting_reboot"), "complete_reboot")
+        self.assertEqual(command_boot_action("ota_install", "awaiting_reboot"), "reconcile_ota")
+        self.assertEqual(command_boot_action("maintenance_sleep", "awaiting_heartbeat"), "complete_wake")
+        self.assertEqual(command_boot_action("apply_configuration", "awaiting_reboot"), "fail_interrupted")
+        self.assertEqual(command_boot_action("sync_now", "succeeded"), "ignore")
+
 
 class SecurityTests(unittest.TestCase):
     def test_secret_redaction(self):
@@ -332,6 +367,46 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "a51033ff701fca756439d641c0ad09a41d9242fa69121c7d8769604a0a629825",
             },
         )
+
+
+class PersistenceSafetySourceTests(unittest.TestCase):
+    @staticmethod
+    def _source(relative: str) -> str:
+        return (Path(__file__).resolve().parents[2] / relative).read_text(encoding="utf-8")
+
+    def test_sequence_recovery_never_reinitializes_corrupt_or_unreadable_slots(self):
+        source = self._source("components/pm_storage/pm_sequence.c")
+        self.assertIn("error_a != ESP_ERR_NVS_NOT_FOUND || error_b != ESP_ERR_NVS_NOT_FOUND", source)
+        self.assertIn("a.state.generation == b.state.generation", source)
+        self.assertIn("memcmp(&a.state, &b.state, sizeof(a.state)) != 0", source)
+        self.assertIn("state->generation == UINT32_MAX", source)
+
+    def test_identity_is_created_only_when_the_nvs_key_is_absent(self):
+        source = self._source("main/app_main.c")
+        load = source.split("static esp_err_t load_or_create_identity", 1)[1].split(
+            "static esp_err_t persist_identity", 1
+        )[0]
+        self.assertIn("error == ESP_ERR_NVS_NOT_FOUND", load)
+        self.assertIn("error != ESP_OK", load)
+        self.assertIn("return ESP_ERR_INVALID_CRC", load)
+        self.assertIn("prior.generation == UINT32_MAX", source)
+
+    def test_ota_checkpoint_writes_are_blocking_and_ota_is_single_flight(self):
+        ota = self._source("components/pm_ota/pm_ota.c")
+        app = self._source("main/app_main.c")
+        self.assertNotIn("(void)persist_checkpoint", ota)
+        self.assertIn("checkpoint->generation == UINT32_MAX", ota)
+        self.assertIn("error_a != ESP_ERR_NVS_NOT_FOUND || error_b != ESP_ERR_NVS_NOT_FOUND", ota)
+        self.assertIn("a.generation == b.generation && memcmp(&a, &b, sizeof(a)) != 0", ota)
+        self.assertIn("static bool claim_ota_task", app)
+        self.assertIn("result = claim_ota_task() ? ESP_OK : ESP_ERR_INVALID_STATE", app)
+
+    def test_wifi_plaintext_stack_copy_is_zeroized(self):
+        source = self._source("components/pm_network/pm_network.c")
+        configure = source.split("static esp_err_t configure_wifi", 1)[1].split(
+            "static esp_err_t connect_wifi_bounded", 1
+        )[0]
+        self.assertIn("secure_zero_memory(&wifi, sizeof(wifi))", configure)
 
 
 if __name__ == "__main__":
