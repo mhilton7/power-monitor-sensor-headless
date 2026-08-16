@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
 import sys
+import tempfile
 import unittest
-
+from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from audit_stack_frames import parse_disassembly  # noqa: E402
+from audit_stack_frames import parse_disassembly, resolve_objdump  # noqa: E402
 
 
 class StackFrameAuditTests(unittest.TestCase):
@@ -35,6 +37,27 @@ class StackFrameAuditTests(unittest.TestCase):
 """
         )
         self.assertTrue(functions[0]["dynamic_frame"])
+
+    def test_discovers_objdump_beside_recorded_compiler_when_path_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            build_dir = root / "build"
+            toolchain = root / "toolchain"
+            build_dir.mkdir()
+            toolchain.mkdir()
+            compiler = toolchain / "xtensa-esp32s3-elf-gcc"
+            objdump = toolchain / "xtensa-esp32s3-elf-objdump"
+            objdump.touch()
+            (build_dir / "compile_commands.json").write_text(
+                json.dumps([{"command": f'"{compiler}" -c input.c -o input.o'}]),
+                encoding="utf-8",
+            )
+            with mock.patch("audit_stack_frames.shutil.which", return_value=None):
+                self.assertEqual(resolve_objdump(build_dir, None), str(objdump))
+
+    def test_explicit_objdump_path_takes_precedence(self) -> None:
+        self.assertEqual(resolve_objdump(Path("unused"), "custom-objdump"), "custom-objdump")
+
 
 if __name__ == "__main__":
     unittest.main()

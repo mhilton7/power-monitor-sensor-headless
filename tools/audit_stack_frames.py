@@ -2,15 +2,64 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
-
+from pathlib import Path
 
 FUNCTION_RE = re.compile(r"^[0-9a-fA-F]+ <([^>]+)>:$")
 ENTRY_RE = re.compile(r"\bentry\s+a\d+,\s*(0x[0-9a-fA-F]+|\d+)\b")
 MOVSP_RE = re.compile(r"\bmovsp\b")
+COMPILER_RE = re.compile(r"(?:gcc|g\+\+)(\.exe)?$", re.IGNORECASE)
+
+
+def _command_executable(entry: object) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    arguments = entry.get("arguments")
+    if isinstance(arguments, list) and arguments and isinstance(arguments[0], str):
+        return arguments[0]
+    command = entry.get("command")
+    if not isinstance(command, str):
+        return None
+    match = re.match(r'^\s*(?:"([^"]+)"|(\S+))', command)
+    if match is None:
+        return None
+    return match.group(1) or match.group(2)
+
+
+def resolve_objdump(build_dir: Path, requested: str | None) -> str:
+    if requested:
+        return requested
+    for command in ("xtensa-esp32s3-elf-objdump", "xtensa-esp-elf-objdump"):
+        resolved = shutil.which(command)
+        if resolved is not None:
+            return resolved
+    compile_commands = build_dir / "compile_commands.json"
+    if not compile_commands.is_file():
+        raise RuntimeError(f"missing compiler inventory: {compile_commands}")
+    try:
+        entries = json.loads(compile_commands.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid compiler inventory {compile_commands}: {exc}") from exc
+    if not isinstance(entries, list):
+        raise RuntimeError(f"invalid compiler inventory shape: {compile_commands}")
+    for entry in entries:
+        compiler = _command_executable(entry)
+        if compiler is None:
+            continue
+        compiler_path = Path(compiler)
+        objdump_name = COMPILER_RE.sub(r"objdump\1", compiler_path.name)
+        if objdump_name == compiler_path.name:
+            continue
+        candidate = compiler_path.with_name(objdump_name)
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError(
+        "could not locate the Xtensa objdump on PATH or beside the compiler recorded in "
+        f"{compile_commands}"
+    )
 
 
 def parse_disassembly(text: str) -> list[dict[str, object]]:
@@ -35,7 +84,9 @@ def parse_disassembly(text: str) -> list[dict[str, object]]:
 
 def first_party_objects(project_root: Path, build_dir: Path) -> list[tuple[str, Path]]:
     components = ["main"]
-    components.extend(sorted(path.name for path in (project_root / "components").iterdir() if path.is_dir()))
+    components.extend(
+        sorted(path.name for path in (project_root / "components").iterdir() if path.is_dir())
+    )
     objects: list[tuple[str, Path]] = []
     missing: list[str] = []
     for component in components:
@@ -57,7 +108,8 @@ def audit(
 ) -> dict[str, object]:
     records: list[dict[str, object]] = []
     for component, object_path in first_party_objects(project_root, build_dir):
-        process = subprocess.run(
+        # The executable is explicit or resolved beside CMake's recorded pinned compiler.
+        process = subprocess.run(  # noqa: S603
             [objdump, "-d", str(object_path)],
             cwd=project_root,
             text=True,
@@ -69,9 +121,12 @@ def audit(
         relative_object = object_path.relative_to(build_dir).as_posix()
         for function in parse_disassembly(process.stdout):
             records.append({"component": component, "object": relative_object, **function})
-    records.sort(key=lambda item: (-int(item["frame_bytes"]), str(item["component"]), str(item["function"])))
+    records.sort(
+        key=lambda item: (-int(item["frame_bytes"]), str(item["component"]), str(item["function"]))
+    )
     violations = [
-        record for record in records
+        record
+        for record in records
         if int(record["frame_bytes"]) > threshold or bool(record["dynamic_frame"])
     ]
     return {
@@ -90,7 +145,10 @@ def main() -> int:
         description="Audit every first-party ESP-IDF object for oversized or dynamic stack frames."
     )
     parser.add_argument("--build-dir", required=True, type=Path)
-    parser.add_argument("--objdump", default="xtensa-esp32s3-elf-objdump")
+    parser.add_argument(
+        "--objdump",
+        help="explicit objdump path; otherwise discover it on PATH or beside the recorded compiler",
+    )
     parser.add_argument("--threshold", type=int, default=3072)
     parser.add_argument("--json", type=Path, dest="json_path")
     args = parser.parse_args()
@@ -99,15 +157,22 @@ def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
     build_dir = args.build_dir.resolve()
     try:
-        result = audit(project_root, build_dir, args.objdump, args.threshold)
+        objdump = resolve_objdump(build_dir, args.objdump)
+        result = audit(project_root, build_dir, objdump, args.threshold)
     except (OSError, RuntimeError) as exc:
         print(f"stack frame audit failed: {exc}", file=sys.stderr)
         return 2
     if args.json_path is not None:
         args.json_path.parent.mkdir(parents=True, exist_ok=True)
-        args.json_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        args.json_path.write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     for violation in result["violations"]:
-        detail = "dynamic movsp frame" if violation["dynamic_frame"] else f"{violation['frame_bytes']} bytes"
+        detail = (
+            "dynamic movsp frame"
+            if violation["dynamic_frame"]
+            else f"{violation['frame_bytes']} bytes"
+        )
         print(f"FAIL {violation['component']}:{violation['function']}: {detail}", file=sys.stderr)
     if result["violations"]:
         return 1
