@@ -327,6 +327,12 @@ jobs:
           -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;${{ needs.tag_authenticity.outputs.sdkconfig }}"
           -D "PM_FIRMWARE_VERSION=${{ needs.tag_authenticity.outputs.version }}"
           set-target esp32s3 build
+      - name: Verify compiled PZEM and timing profile
+        env:
+          CONFIGURATION: ${{ needs.tag_authenticity.outputs.configuration }}
+        run: >-
+          /opt/esp/entrypoint.sh python tools/verify_firmware_profile.py
+          --sdkconfig-header build-release/config/sdkconfig.h --profile "$CONFIGURATION"
       - name: Audit the compiled external dependency set
         run: >-
           /opt/esp/entrypoint.sh python tools/audit_dependencies.py
@@ -391,7 +397,7 @@ jobs:
             --download-base "https://github.com/mhilton7/power-monitor-sensor-headless/releases/download/$GITHUB_REF_NAME" \
             --hardware-status "test-results/release-input/$HARDWARE_FILENAME" \
             --configuration "$CONFIGURATION" \
-            --server-tag "$GITHUB_REF_NAME" \
+            --server-tag "v0.1.0-rc.8" \
             --dependency-audit-report test-results/security/dependency-audit.json
       - name: Verify the complete release artifact set
         env:

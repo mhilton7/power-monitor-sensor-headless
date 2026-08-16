@@ -55,7 +55,7 @@ struct pm_meter_driver {
     const pm_meter_driver_ops_t *ops;
     pm_meter_variant_t variant;
     uint8_t slave_address;
-    bool hardware_identity_verified;
+    bool physical_reads_enabled;
     bool simulated;
     uint64_t simulation_tick;
 };
@@ -64,7 +64,7 @@ uint16_t pm_modbus_crc16(const uint8_t *data, size_t length);
 size_t pm_pzem_v4_classic_build_request(uint8_t slave, uint8_t request[PM_PZEM_REQUEST_SIZE]);
 pm_pzem_status_t pm_pzem_v4_classic_parse_response(uint8_t slave, const uint8_t *frame, size_t length,
                                                    pm_meter_sample_t *sample);
-esp_err_t pm_meter_create(pm_meter_driver_t *driver, pm_meter_variant_t variant, bool hardware_verified,
+esp_err_t pm_meter_create(pm_meter_driver_t *driver, pm_meter_variant_t variant, bool physical_reads_enabled,
                           bool simulated);
 esp_err_t pm_meter_read(pm_meter_driver_t *driver, pm_meter_sample_t *sample, uint32_t timeout_ms);
 bool pm_meter_sample_valid(const pm_meter_sample_t *sample, uint16_t ct_rating_a);

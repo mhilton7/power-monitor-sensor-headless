@@ -18,6 +18,8 @@
 #include "psa/crypto.h"
 #include "pm_board.h"
 #include "pm_config.h"
+#include "pm_http_response.h"
+#include "pm_ota_version.h"
 #include "pm_protocol.h"
 
 #define PM_OTA_BUFFER_SIZE 4096U
@@ -308,7 +310,13 @@ esp_err_t pm_ota_verify_manifest(const pm_ota_manifest_t *manifest, const uint8_
                        strlen(canonical), expected) != ESP_OK) {
         return ESP_FAIL;
     }
-    return pm_constant_time_equal(expected, manifest->signature, sizeof(expected)) ? ESP_OK : ESP_ERR_INVALID_CRC;
+    if (!pm_constant_time_equal(expected, manifest->signature, sizeof(expected))) {
+        return ESP_ERR_INVALID_CRC;
+    }
+    const esp_app_desc_t *running = esp_app_get_description();
+    return running != NULL &&
+           pm_ota_version_require_upgrade(running->version, manifest->version) == ESP_OK ?
+        ESP_OK : ESP_ERR_NOT_SUPPORTED;
 }
 
 static void report(pm_ota_progress_fn callback, void *context, uint8_t percent, pm_ota_stage_t stage)
@@ -318,16 +326,16 @@ static void report(pm_ota_progress_fn callback, void *context, uint8_t percent, 
     }
 }
 
-static esp_err_t copy_http_header(esp_http_client_handle_t client, const char *name,
-                                  char *destination, size_t capacity)
+static esp_err_t capture_response_header_event(esp_http_client_event_t *event)
 {
-    char *value = NULL;
-    if (esp_http_client_get_header(client, name, &value) != ESP_OK || value == NULL ||
-        value[0] == '\0' || strlen(value) >= capacity) {
-        return ESP_ERR_INVALID_RESPONSE;
+    if (event == NULL || event->user_data == NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
-    memcpy(destination, value, strlen(value) + 1U);
-    return ESP_OK;
+    if (event->event_id != HTTP_EVENT_ON_HEADER) {
+        return ESP_OK;
+    }
+    return pm_http_response_capture_header((pm_http_response_capture_t *)event->user_data,
+                                           event->header_key, event->header_value);
 }
 
 esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
@@ -370,6 +378,8 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
     if (error != ESP_OK) {
         return error;
     }
+    pm_http_response_capture_t response_headers;
+    pm_http_response_capture_init(&response_headers);
     const esp_http_client_config_t http_config = {
         .url = manifest->download_url,
         .cert_pem = ca_pem,
@@ -378,6 +388,8 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         .buffer_size_tx = 1024,
         .keep_alive_enable = true,
         .disable_auto_redirect = true,
+        .event_handler = capture_response_header_event,
+        .user_data = &response_headers,
     };
     esp_http_client_handle_t client = esp_http_client_init(&http_config);
     if (client == NULL) {
@@ -417,37 +429,13 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         error = error == ESP_OK ? ESP_ERR_INVALID_RESPONSE : error;
         goto cleanup;
     }
-    pm_response_auth_headers_t response_auth = {0};
-    error = copy_http_header(client, "X-PM-Protocol", response_auth.protocol, sizeof(response_auth.protocol));
-    if (error == ESP_OK) {
-        error = copy_http_header(client, "X-PM-Device-ID", response_auth.device_id,
-                                 sizeof(response_auth.device_id));
-    }
-    if (error == ESP_OK) {
-        error = copy_http_header(client, "X-PM-Timestamp", response_auth.timestamp,
-                                 sizeof(response_auth.timestamp));
-    }
-    if (error == ESP_OK) {
-        error = copy_http_header(client, "X-PM-Nonce", response_auth.nonce, sizeof(response_auth.nonce));
-    }
-    if (error == ESP_OK) {
-        error = copy_http_header(client, "X-PM-Content-SHA256", response_auth.content_sha256,
-                                 sizeof(response_auth.content_sha256));
-    }
-    if (error == ESP_OK) {
-        error = copy_http_header(client, "X-PM-Signature", response_auth.signature,
-                                 sizeof(response_auth.signature));
-    }
-    char etag[68] = {0};
+    error = pm_http_response_capture_validate(&response_headers, true);
     char expected_etag[68] = {0};
     char manifest_digest_hex[65];
     pm_hex_lower(manifest->image_sha256, sizeof(manifest->image_sha256),
                  manifest_digest_hex, sizeof(manifest_digest_hex));
     (void)snprintf(expected_etag, sizeof(expected_etag), "\"%s\"", manifest_digest_hex);
-    if (error == ESP_OK) {
-        error = copy_http_header(client, "ETag", etag, sizeof(etag));
-    }
-    if (error != ESP_OK || strcmp(etag, expected_etag) != 0) {
+    if (error != ESP_OK || strcmp(response_headers.etag, expected_etag) != 0) {
         error = ESP_ERR_INVALID_RESPONSE;
         goto cleanup;
     }
@@ -507,7 +495,7 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         (esp_timer_get_time() - request_started_us) / INT64_C(1000);
     error = pm_verify_response_digest(server_to_device_key, manifest->device_id,
                                       manifest->download_path, NULL, response_now_utc_ms,
-                                      &response_auth, downloaded_digest_hex, &response_nonce_cache);
+                                      &response_headers.auth, downloaded_digest_hex, &response_nonce_cache);
     if (error != ESP_OK) {
         goto cleanup;
     }

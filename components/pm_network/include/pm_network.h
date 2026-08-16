@@ -101,6 +101,7 @@ void pm_network_heartbeat_complete(pm_network_scheduler_t *scheduler, int64_t no
 uint32_t pm_network_reconnect_delay_ms(uint32_t attempt, uint32_t random_value);
 pm_tls_error_class_t pm_network_classify_error(esp_err_t error, int http_status);
 esp_err_t pm_network_publish_live(const pm_meter_sample_t *sample);
+esp_err_t pm_network_copy_live(pm_meter_sample_t *sample, bool *present);
 void pm_network_request_sync(void);
 void pm_network_health_update(pm_network_context_t *context, pm_network_health_flag_t flag, bool active);
 esp_err_t pm_network_serialize_heartbeat(pm_network_context_t *context, const pm_meter_sample_t *sample,

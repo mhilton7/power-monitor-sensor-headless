@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "pm_ota.c"
+    SRCS "pm_ota.c" "pm_ota_version.c"
     INCLUDE_DIRS "include"
     REQUIRES app_update esp_http_client esp_https_ota mbedtls nvs_flash heap espressif__cjson pm_protocol pm_config
 )
