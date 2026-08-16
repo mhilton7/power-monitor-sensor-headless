@@ -85,6 +85,19 @@ static esp_err_t update_capacity(void)
     return ESP_OK;
 }
 
+static esp_err_t refresh_capacity(void)
+{
+    const esp_err_t error = update_capacity();
+    if (error == ESP_OK && s_health->status == PM_STORAGE_FULL &&
+        s_health->bytes_free >= PM_STORAGE_EMERGENCY_RESERVE) {
+        /* A previous ENOSPC/no-reclaim condition is not permanent. Re-admit
+         * writes only after the mounted FAT filesystem reports the complete
+         * emergency reserve again. */
+        s_health->status = PM_STORAGE_READY;
+    }
+    return error;
+}
+
 static esp_err_t card_identity(void)
 {
     char path[128];
@@ -647,9 +660,15 @@ static esp_err_t format_storage(const uint8_t token[16], bool authenticated_reco
 static void storage_task(void *context)
 {
     (void)context;
+    int64_t last_capacity_refresh_us = esp_timer_get_time();
     for (;;) {
         storage_message_t message = {0};
         if (xQueueReceive(s_queue, &message, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            const int64_t now_us = esp_timer_get_time();
+            if (now_us - last_capacity_refresh_us >= INT64_C(60000000)) {
+                (void)refresh_capacity();
+                last_capacity_refresh_us = now_us;
+            }
             continue;
         }
         esp_err_t result = ESP_ERR_NOT_SUPPORTED;
@@ -690,6 +709,11 @@ esp_err_t pm_storage_start(const uint8_t device_id[16], pm_storage_health_t *hea
     }
     if (error != ESP_OK) {
         health->status = PM_STORAGE_CORRUPT;
+    } else {
+        error = refresh_capacity();
+        if (error != ESP_OK) {
+            health->status = PM_STORAGE_IO_ERROR;
+        }
     }
     s_queue = xQueueCreate(PM_STORAGE_QUEUE_DEPTH, sizeof(storage_message_t));
     if (s_queue == NULL || xTaskCreate(storage_task, "pm_storage", PM_STORAGE_TASK_STACK, NULL, 8U, &s_task) != pdPASS) {

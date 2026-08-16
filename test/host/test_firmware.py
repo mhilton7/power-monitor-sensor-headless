@@ -419,6 +419,10 @@ class PersistenceSafetySourceTests(unittest.TestCase):
         self.assertIn(
             "esp_vfs_fat_info(PM_SD_MOUNT_POINT, &bytes_total, &bytes_free)", storage
         )
+        self.assertIn("error = refresh_capacity();", storage)
+        self.assertIn("now_us - last_capacity_refresh_us >= INT64_C(60000000)", storage)
+        self.assertIn("s_health->status == PM_STORAGE_FULL", storage)
+        self.assertIn("s_health->bytes_free >= PM_STORAGE_EMERGENCY_RESERVE", storage)
         self.assertIn("bytes_total == 0U || bytes_free > bytes_total", storage)
         self.assertIn(
             "error == ESP_ERR_NO_MEM ? PM_STORAGE_FULL : PM_STORAGE_IO_ERROR", storage
@@ -430,6 +434,17 @@ class PersistenceSafetySourceTests(unittest.TestCase):
         self.assertIn('json_add_u64(root, "storage_bytes_free"', network)
         self.assertIn('json_add_null(root, "storage_bytes_total")', network)
         self.assertIn('json_add_null(root, "storage_bytes_free")', network)
+
+    def test_untrusted_clock_retries_sntp_without_waiting_an_hour(self) -> None:
+        app = self._source("main/app_main.c")
+        self.assertIn(
+            "if (!s_time.trusted || now_us - last_time_checkpoint >= INT64_C(3600000000))",
+            app,
+        )
+        self.assertIn(
+            "if (pm_time_observe(&s_time, PM_TIME_SNTP, system_utc_ms, now_us) == ESP_OK)",
+            app,
+        )
 
     def test_ota_requires_a_strict_semantic_version_upgrade(self):
         ota = self._source("components/pm_ota/pm_ota.c")

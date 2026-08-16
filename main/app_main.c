@@ -2365,12 +2365,13 @@ static void supervisor_task(void *argument)
     int64_t last_time_checkpoint = 0;
     for (;;) {
         const int64_t now_us = esp_timer_get_time();
-        if (now_us - last_time_checkpoint >= INT64_C(3600000000)) {
+        if (!s_time.trusted || now_us - last_time_checkpoint >= INT64_C(3600000000)) {
             const int64_t system_utc_ms = (int64_t)time(NULL) * 1000;
             if (system_utc_ms >= INT64_C(1704067200000)) {
-                (void)pm_time_observe(&s_time, PM_TIME_SNTP, system_utc_ms, now_us);
+                if (pm_time_observe(&s_time, PM_TIME_SNTP, system_utc_ms, now_us) == ESP_OK) {
+                    last_time_checkpoint = now_us;
+                }
             }
-            last_time_checkpoint = now_us;
         }
         (void)esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(5000));
