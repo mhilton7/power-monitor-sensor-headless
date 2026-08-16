@@ -6,7 +6,7 @@ The sole authority for voltage, current, power, frequency, power factor, cumulat
 
 ## Release status
 
-`0.1.0-rc.9` fixes false microSD-full detection by replacing ESP-IDF's unsupported `statvfs` stub with the supported FAT-volume capacity API. It reports authenticated total/free byte counts while keeping failed capacity queries distinct from genuine full media. RC9 retains RC8's corrected response-header authentication and strict read-only PZEM polling without changing task cadence, protocol, or certification status. `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED` remains disabled, release artifacts remain `hardware_certification: pending`, and stable promotion still requires exact marked-unit evidence, electrical validation, and the 72-hour suite. Public RC8 remains immutable. `pm-protocol/1.0.0` is unchanged; see [hardware identity](docs/HARDWARE_IDENTITY.md) and [hardware certification](docs/HARDWARE_CERTIFICATION.md).
+`0.1.0-rc.10` retains RC9's supported FAT-volume capacity API and refreshes mounted-card capacity periodically so a stale full state can recover after media changes. It also retries trusted-time synchronization while time remains untrusted, without changing measurement cadence, task topology, protocol, or certification status. RC10 retains RC8's corrected response-header authentication and strict read-only PZEM polling. `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED` remains disabled, release artifacts remain `hardware_certification: pending`, and stable promotion still requires exact marked-unit evidence, electrical validation, and the 72-hour suite. Public RC9 remains immutable. `pm-protocol/1.0.0` is unchanged; see [hardware identity](docs/HARDWARE_IDENTITY.md) and [hardware certification](docs/HARDWARE_CERTIFICATION.md).
 
 ## Build and test
 
