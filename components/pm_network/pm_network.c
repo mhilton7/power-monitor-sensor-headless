@@ -622,6 +622,13 @@ esp_err_t pm_network_serialize_heartbeat(pm_network_context_t *context, const pm
     cJSON_AddStringToObject(root, "firmware_version", esp_app_get_description()->version);
     cJSON_AddItemToObject(root, "measurement", measurement);
     cJSON_AddStringToObject(root, "storage_status", contract_storage_status(context->storage->status));
+    if (context->storage->bytes_total != 0U && context->storage->bytes_free <= context->storage->bytes_total) {
+        json_add_u64(root, "storage_bytes_total", context->storage->bytes_total);
+        json_add_u64(root, "storage_bytes_free", context->storage->bytes_free);
+    } else {
+        json_add_null(root, "storage_bytes_total");
+        json_add_null(root, "storage_bytes_free");
+    }
     cJSON_AddStringToObject(root, "time_status", time_trusted ? "trusted" : "untrusted");
 
     wifi_ap_record_t access_point = {0};

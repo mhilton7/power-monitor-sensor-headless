@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "driver/sdspi_host.h"
@@ -70,13 +69,20 @@ static esp_err_t sync_file(FILE *file)
     return file != NULL && fflush(file) == 0 && fsync(fileno(file)) == 0 ? ESP_OK : ESP_FAIL;
 }
 
-static void update_capacity(void)
+static esp_err_t update_capacity(void)
 {
-    struct statvfs info = {0};
-    if (s_health != NULL && statvfs(PM_SD_MOUNT_POINT, &info) == 0) {
-        s_health->bytes_total = (uint64_t)info.f_blocks * info.f_frsize;
-        s_health->bytes_free = (uint64_t)info.f_bavail * info.f_frsize;
+    if (s_health == NULL) {
+        return ESP_ERR_INVALID_STATE;
     }
+    uint64_t bytes_total = 0U;
+    uint64_t bytes_free = 0U;
+    const esp_err_t error = esp_vfs_fat_info(PM_SD_MOUNT_POINT, &bytes_total, &bytes_free);
+    if (error != ESP_OK || bytes_total == 0U || bytes_free > bytes_total) {
+        return error == ESP_OK ? ESP_ERR_INVALID_SIZE : error;
+    }
+    s_health->bytes_total = bytes_total;
+    s_health->bytes_free = bytes_free;
+    return ESP_OK;
 }
 
 static esp_err_t card_identity(void)
@@ -185,7 +191,9 @@ static esp_err_t mount_card(void)
     if (error == ESP_OK) {
         error = storage_self_test();
     }
-    update_capacity();
+    if (error == ESP_OK) {
+        error = update_capacity();
+    }
     return error;
 }
 
@@ -249,7 +257,10 @@ static esp_err_t rotate_current(void)
 
 static esp_err_t reclaim_acknowledged_segments(void)
 {
-    update_capacity();
+    esp_err_t error = update_capacity();
+    if (error != ESP_OK) {
+        return error;
+    }
     while (s_health->bytes_free < PM_STORAGE_EMERGENCY_RESERVE) {
         DIR *directory = opendir(PM_JOURNAL_DIR);
         if (directory == NULL) {
@@ -278,7 +289,10 @@ static esp_err_t reclaim_acknowledged_segments(void)
         if (!journal_path(path, reclaim_name) || unlink(path) != 0) {
             return ESP_FAIL;
         }
-        update_capacity();
+        error = update_capacity();
+        if (error != ESP_OK) {
+            return error;
+        }
     }
     s_health->oldest_sequence = 0U;
     s_health->newest_sequence = 0U;
@@ -290,9 +304,12 @@ static esp_err_t append_record(const pm_journal_record_t *record)
     if (s_health == NULL || s_health->status != PM_STORAGE_READY) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_health->bytes_free < PM_STORAGE_EMERGENCY_RESERVE && reclaim_acknowledged_segments() != ESP_OK) {
-        s_health->status = PM_STORAGE_FULL;
-        return ESP_ERR_NO_MEM;
+    if (s_health->bytes_free < PM_STORAGE_EMERGENCY_RESERVE) {
+        const esp_err_t error = reclaim_acknowledged_segments();
+        if (error != ESP_OK) {
+            s_health->status = error == ESP_ERR_NO_MEM ? PM_STORAGE_FULL : PM_STORAGE_IO_ERROR;
+            return error;
+        }
     }
     if (s_current == NULL) {
         const esp_err_t error = open_current(record);
@@ -315,7 +332,7 @@ static esp_err_t append_record(const pm_journal_record_t *record)
     if (record->sequence > s_health->newest_sequence) {
         s_health->newest_sequence = record->sequence;
     }
-    update_capacity();
+    (void)update_capacity();
     return s_current_size >= PM_STORAGE_SEGMENT_LIMIT ? rotate_current() : ESP_OK;
 }
 
@@ -608,6 +625,12 @@ static esp_err_t format_storage(const uint8_t token[16], bool authenticated_reco
         memset(s_health->card_id, 0, sizeof(s_health->card_id));
         error = card_identity();
     }
+    if (error == ESP_OK) {
+        error = storage_self_test();
+    }
+    if (error == ESP_OK) {
+        error = update_capacity();
+    }
     s_format.state = error == ESP_OK ? PM_FORMAT_COMPLETE : PM_FORMAT_FAILED;
     if (error == ESP_OK) {
         const uint8_t saved_card[16] = {0};
@@ -657,7 +680,7 @@ esp_err_t pm_storage_start(const uint8_t device_id[16], pm_storage_health_t *hea
     memcpy(s_device_id, device_id, sizeof(s_device_id));
     esp_err_t error = mount_card();
     if (error != ESP_OK) {
-        health->status = PM_STORAGE_MISSING;
+        health->status = s_card == NULL ? PM_STORAGE_MISSING : PM_STORAGE_IO_ERROR;
         return error;
     }
     health->status = PM_STORAGE_READY;

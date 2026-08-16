@@ -344,6 +344,32 @@
       "default": null,
       "title": "Reboot Reason"
     },
+    "storage_bytes_free": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Storage Bytes Free"
+    },
+    "storage_bytes_total": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Storage Bytes Total"
+    },
     "storage_status": {
       "enum": [
         "ok",

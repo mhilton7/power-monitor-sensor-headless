@@ -188,9 +188,9 @@ class ServerContractTests(unittest.TestCase):
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
     def test_rc8_release_identity_is_coordinated_with_server_rc8(self) -> None:
-        expected_tag = "v0.1.0-rc.8"
+        expected_tag = "v0.1.0-rc.9"
         expected_openapi_sha256 = (
-            "b7f8726f73633bd577da2cd3a9bfb7a2104615dafb44681564cd81fce8c8148f"
+            "41dcb941227367b2097b4b16d8c43d0312bc9a3794e1fa96e7a2c89b77f37c63"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(

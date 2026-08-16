@@ -412,6 +412,25 @@ class PersistenceSafetySourceTests(unittest.TestCase):
         self.assertIn("(capture->seen_mask & field) != 0U", capture)
         self.assertIn("length >= capacity", capture)
 
+    def test_microsd_capacity_uses_supported_fatfs_api_and_is_reported(self):
+        storage = self._source("components/pm_storage/pm_storage.c")
+        network = self._source("components/pm_network/pm_network.c")
+        self.assertNotIn("statvfs", storage)
+        self.assertIn(
+            "esp_vfs_fat_info(PM_SD_MOUNT_POINT, &bytes_total, &bytes_free)", storage
+        )
+        self.assertIn("bytes_total == 0U || bytes_free > bytes_total", storage)
+        self.assertIn(
+            "error == ESP_ERR_NO_MEM ? PM_STORAGE_FULL : PM_STORAGE_IO_ERROR", storage
+        )
+        self.assertIn(
+            "s_card == NULL ? PM_STORAGE_MISSING : PM_STORAGE_IO_ERROR", storage
+        )
+        self.assertIn('json_add_u64(root, "storage_bytes_total"', network)
+        self.assertIn('json_add_u64(root, "storage_bytes_free"', network)
+        self.assertIn('json_add_null(root, "storage_bytes_total")', network)
+        self.assertIn('json_add_null(root, "storage_bytes_free")', network)
+
     def test_ota_requires_a_strict_semantic_version_upgrade(self):
         ota = self._source("components/pm_ota/pm_ota.c")
         policy = self._source("components/pm_ota/pm_ota_version.c")

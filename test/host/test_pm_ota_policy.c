@@ -20,6 +20,7 @@ static unsigned int failures;
 static void test_strict_monotonic_versions(void)
 {
     CHECK(pm_ota_version_require_upgrade("0.1.0-rc.7", "0.1.0-rc.8") == ESP_OK);
+    CHECK(pm_ota_version_require_upgrade("0.1.0-rc.8", "0.1.0-rc.9") == ESP_OK);
     CHECK(pm_ota_version_require_upgrade("0.1.0-rc.8", "0.1.0") == ESP_OK);
     CHECK(pm_ota_version_require_upgrade("0.1.0", "0.1.1-rc.1") == ESP_OK);
     CHECK(pm_ota_version_require_upgrade("0.1.9", "0.2.0-rc.1") == ESP_OK);
