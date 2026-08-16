@@ -74,6 +74,7 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
                          const uint8_t device_to_server_key[32], const uint8_t server_to_device_key[32],
                          int64_t request_utc_ms, pm_ota_progress_fn progress, void *context);
 esp_err_t pm_ota_load_checkpoint(pm_ota_checkpoint_t *checkpoint);
+esp_err_t pm_ota_cancel_pending_boot(esp_err_t reason);
 esp_err_t pm_ota_post_boot_validate(bool config_readable, bool scheduler_running, bool watchdog_running,
                                     bool storage_initialized_or_degraded, bool network_retry_capable);
 

@@ -8,6 +8,7 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_ota_ops.h"
 #include "esp_random.h"
@@ -20,6 +21,25 @@
 #include "pm_protocol.h"
 
 #define PM_OTA_BUFFER_SIZE 4096U
+
+static void secure_zero_memory(void *value, size_t length)
+{
+    volatile uint8_t *bytes = (volatile uint8_t *)value;
+    while (length-- > 0U) {
+        *bytes++ = 0U;
+    }
+}
+
+static uint8_t *allocate_download_buffer(void)
+{
+    uint8_t *buffer = (uint8_t *)heap_caps_malloc(
+        PM_OTA_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buffer == NULL) {
+        buffer = (uint8_t *)heap_caps_malloc(
+            PM_OTA_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return buffer;
+}
 
 static bool uuid_valid(const char *value)
 {
@@ -162,21 +182,48 @@ static bool checkpoint_valid(const pm_ota_checkpoint_t *checkpoint)
            checkpoint->crc32 == checkpoint_crc(checkpoint);
 }
 
+static esp_err_t read_checkpoint(nvs_handle_t handle, const char *key,
+                                 pm_ota_checkpoint_t *checkpoint)
+{
+    size_t length = sizeof(*checkpoint);
+    const esp_err_t error = nvs_get_blob(handle, key, checkpoint, &length);
+    if (error != ESP_OK) {
+        return error;
+    }
+    return length == sizeof(*checkpoint) && checkpoint_valid(checkpoint) ? ESP_OK :
+           ESP_ERR_INVALID_CRC;
+}
+
 static esp_err_t persist_checkpoint(pm_ota_checkpoint_t *checkpoint)
 {
-    checkpoint->generation++;
-    checkpoint->crc32 = checkpoint_crc(checkpoint);
+    if (checkpoint == NULL || checkpoint->generation == UINT32_MAX) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pm_ota_checkpoint_t candidate = *checkpoint;
+    candidate.generation++;
+    candidate.crc32 = checkpoint_crc(&candidate);
     nvs_handle_t handle = 0;
     esp_err_t error = nvs_open("pm_ota", NVS_READWRITE, &handle);
     if (error == ESP_OK) {
-        error = nvs_set_blob(handle, (checkpoint->generation & 1U) != 0U ? "slot_a" : "slot_b", checkpoint,
-                             sizeof(*checkpoint));
+        error = nvs_set_blob(handle, (candidate.generation & 1U) != 0U ? "slot_a" : "slot_b",
+                             &candidate, sizeof(candidate));
     }
     if (error == ESP_OK) {
         error = nvs_commit(handle);
     }
+    pm_ota_checkpoint_t verified = {0};
+    if (error == ESP_OK) {
+        error = read_checkpoint(handle, (candidate.generation & 1U) != 0U ? "slot_a" : "slot_b",
+                                &verified);
+    }
+    if (error == ESP_OK && memcmp(&verified, &candidate, sizeof(candidate)) != 0) {
+        error = ESP_ERR_INVALID_STATE;
+    }
     if (handle != 0) {
         nvs_close(handle);
+    }
+    if (error == ESP_OK) {
+        *checkpoint = candidate;
     }
     return error;
 }
@@ -193,16 +240,24 @@ esp_err_t pm_ota_load_checkpoint(pm_ota_checkpoint_t *checkpoint)
     }
     pm_ota_checkpoint_t a = {0};
     pm_ota_checkpoint_t b = {0};
-    size_t length = sizeof(a);
-    const bool valid_a = nvs_get_blob(handle, "slot_a", &a, &length) == ESP_OK && length == sizeof(a) &&
-                         checkpoint_valid(&a);
-    length = sizeof(b);
-    const bool valid_b = nvs_get_blob(handle, "slot_b", &b, &length) == ESP_OK && length == sizeof(b) &&
-                         checkpoint_valid(&b);
+    const esp_err_t error_a = read_checkpoint(handle, "slot_a", &a);
+    const esp_err_t error_b = read_checkpoint(handle, "slot_b", &b);
+    const bool valid_a = error_a == ESP_OK;
+    const bool valid_b = error_b == ESP_OK;
     nvs_close(handle);
     if (!valid_a && !valid_b) {
+        if (error_a != ESP_ERR_NVS_NOT_FOUND || error_b != ESP_ERR_NVS_NOT_FOUND) {
+            return error_a != ESP_ERR_NVS_NOT_FOUND ? error_a : error_b;
+        }
         *checkpoint = (pm_ota_checkpoint_t){.stage = PM_OTA_IDLE};
         return persist_checkpoint(checkpoint);
+    }
+    if ((!valid_a && error_a != ESP_ERR_NVS_NOT_FOUND) ||
+        (!valid_b && error_b != ESP_ERR_NVS_NOT_FOUND)) {
+        return !valid_a && error_a != ESP_ERR_NVS_NOT_FOUND ? error_a : error_b;
+    }
+    if (valid_a && valid_b && a.generation == b.generation && memcmp(&a, &b, sizeof(a)) != 0) {
+        return ESP_ERR_INVALID_STATE;
     }
     *checkpoint = valid_a && (!valid_b || a.generation >= b.generation) ? a : b;
     return ESP_OK;
@@ -279,6 +334,7 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
                          const uint8_t device_to_server_key[32], const uint8_t server_to_device_key[32],
                          int64_t request_utc_ms, pm_ota_progress_fn progress, void *context)
 {
+    uint8_t *buffer = NULL;
     esp_err_t error = pm_ota_verify_manifest(manifest, server_to_device_key);
     if (error != ESP_OK || ca_pem == NULL || ca_pem[0] == '\0' || device_to_server_key == NULL ||
         request_utc_ms < INT64_C(1704067200000)) {
@@ -297,7 +353,10 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         .image_size = manifest->image_size,
     };
     memcpy(checkpoint.image_sha256, manifest->image_sha256, sizeof(checkpoint.image_sha256));
-    (void)persist_checkpoint(&checkpoint);
+    error = persist_checkpoint(&checkpoint);
+    if (error != ESP_OK) {
+        return error;
+    }
     report(progress, context, 0U, checkpoint.stage);
 
     const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
@@ -392,16 +451,23 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         error = ESP_ERR_INVALID_RESPONSE;
         goto cleanup;
     }
+    buffer = allocate_download_buffer();
+    if (buffer == NULL) {
+        error = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
     psa_hash_operation_t sha = PSA_HASH_OPERATION_INIT;
     if (psa_hash_setup(&sha, PSA_ALG_SHA_256) != PSA_SUCCESS) {
         error = ESP_FAIL;
         goto cleanup_sha;
     }
     checkpoint.stage = PM_OTA_DOWNLOADING;
-    (void)persist_checkpoint(&checkpoint);
-    uint8_t buffer[PM_OTA_BUFFER_SIZE];
+    error = persist_checkpoint(&checkpoint);
+    if (error != ESP_OK) {
+        goto cleanup_sha;
+    }
     while (checkpoint.bytes_written < manifest->image_size) {
-        const int received = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
+        const int received = esp_http_client_read(client, (char *)buffer, PM_OTA_BUFFER_SIZE);
         if (received <= 0 || checkpoint.bytes_written + (uint32_t)received > manifest->image_size) {
             error = received == 0 ? ESP_ERR_INVALID_SIZE : ESP_ERR_HTTP_INCOMPLETE_DATA;
             goto cleanup_sha;
@@ -415,7 +481,10 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         const uint8_t percent = (uint8_t)((uint64_t)checkpoint.bytes_written * 90U / manifest->image_size);
         report(progress, context, percent, PM_OTA_DOWNLOADING);
         if ((checkpoint.bytes_written & UINT32_C(0xFFFF)) < (uint32_t)received) {
-            (void)persist_checkpoint(&checkpoint);
+            error = persist_checkpoint(&checkpoint);
+            if (error != ESP_OK) {
+                goto cleanup_sha;
+            }
         }
     }
     uint8_t digest[32];
@@ -455,19 +524,33 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
         goto cleanup;
     }
     checkpoint.stage = PM_OTA_IMAGE_VERIFIED;
-    (void)persist_checkpoint(&checkpoint);
+    error = persist_checkpoint(&checkpoint);
+    if (error != ESP_OK) {
+        goto cleanup;
+    }
     report(progress, context, 95U, checkpoint.stage);
     error = esp_ota_set_boot_partition(partition);
     if (error == ESP_OK) {
         checkpoint.stage = PM_OTA_BOOT_SELECTED;
-        (void)persist_checkpoint(&checkpoint);
-        report(progress, context, 100U, checkpoint.stage);
+        error = persist_checkpoint(&checkpoint);
+        if (error == ESP_OK) {
+            report(progress, context, 100U, checkpoint.stage);
+        } else {
+            const esp_partition_t *running = esp_ota_get_running_partition();
+            if (running != NULL) {
+                (void)esp_ota_set_boot_partition(running);
+            }
+        }
     }
     goto cleanup;
 
 cleanup_sha:
     (void)psa_hash_abort(&sha);
 cleanup:
+    if (buffer != NULL) {
+        secure_zero_memory(buffer, PM_OTA_BUFFER_SIZE);
+        heap_caps_free(buffer);
+    }
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     if (ota != 0) {
@@ -476,7 +559,10 @@ cleanup:
     if (error != ESP_OK) {
         checkpoint.stage = PM_OTA_FAILED;
         checkpoint.last_error = error;
-        (void)persist_checkpoint(&checkpoint);
+        const esp_err_t checkpoint_error = persist_checkpoint(&checkpoint);
+        if (checkpoint_error != ESP_OK) {
+            error = checkpoint_error;
+        }
         report(progress, context, 0U, checkpoint.stage);
     }
     return error;
@@ -493,23 +579,51 @@ esp_err_t pm_ota_post_boot_validate(bool config_readable, bool scheduler_running
     }
     if (config_readable && scheduler_running && watchdog_running && storage_initialized_or_degraded &&
         network_retry_capable) {
-        error = esp_ota_mark_app_valid_cancel_rollback();
-        if (error == ESP_OK) {
-            pm_ota_checkpoint_t checkpoint;
-            if (pm_ota_load_checkpoint(&checkpoint) == ESP_OK) {
-                checkpoint.stage = PM_OTA_VALID;
-                checkpoint.last_error = ESP_OK;
-                (void)persist_checkpoint(&checkpoint);
-            }
+        pm_ota_checkpoint_t checkpoint = {0};
+        error = pm_ota_load_checkpoint(&checkpoint);
+        if (error != ESP_OK) {
+            return error;
         }
+        checkpoint.stage = PM_OTA_VALID;
+        checkpoint.last_error = ESP_OK;
+        error = persist_checkpoint(&checkpoint);
+        if (error != ESP_OK) {
+            return error;
+        }
+        error = esp_ota_mark_app_valid_cancel_rollback();
     } else {
-        pm_ota_checkpoint_t checkpoint;
-        if (pm_ota_load_checkpoint(&checkpoint) == ESP_OK) {
-            checkpoint.stage = PM_OTA_ROLLED_BACK;
-            checkpoint.last_error = ESP_ERR_INVALID_STATE;
-            (void)persist_checkpoint(&checkpoint);
+        pm_ota_checkpoint_t checkpoint = {0};
+        error = pm_ota_load_checkpoint(&checkpoint);
+        if (error != ESP_OK) {
+            return error;
+        }
+        checkpoint.stage = PM_OTA_ROLLED_BACK;
+        checkpoint.last_error = ESP_ERR_INVALID_STATE;
+        error = persist_checkpoint(&checkpoint);
+        if (error != ESP_OK) {
+            return error;
         }
         error = esp_ota_mark_app_invalid_rollback_and_reboot();
+    }
+    return error;
+}
+
+esp_err_t pm_ota_cancel_pending_boot(esp_err_t reason)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    esp_err_t error = esp_ota_set_boot_partition(running);
+    if (error != ESP_OK) {
+        return error;
+    }
+    pm_ota_checkpoint_t checkpoint = {0};
+    error = pm_ota_load_checkpoint(&checkpoint);
+    if (error == ESP_OK) {
+        checkpoint.stage = PM_OTA_FAILED;
+        checkpoint.last_error = reason == ESP_OK ? ESP_ERR_INVALID_STATE : reason;
+        error = persist_checkpoint(&checkpoint);
     }
     return error;
 }

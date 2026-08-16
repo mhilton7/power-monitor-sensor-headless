@@ -121,7 +121,7 @@ def main() -> int:
     parser.add_argument('--download-base', required=True)
     parser.add_argument('--hardware-status', type=Path, required=True)
     parser.add_argument('--configuration', choices=('release-candidate', 'release'), default='release-candidate')
-    parser.add_argument('--server-tag', default='v0.1.0-rc.5')
+    parser.add_argument('--server-tag', default='v0.1.0-rc.6')
     parser.add_argument('--dependency-audit-report', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -251,8 +251,9 @@ def main() -> int:
     })
     write_json(output / 'stack-report.json', {
         'schema':'pm-stack-report/1.0.0','generated_at':generated,
-        'configured_bytes':{'measurement':4096,'interval':4096,'storage':6144,'network':10240,
-                            'control':4096,'supervisor':4096,'usb_recovery':8192,'ota_ephemeral':12288},
+        'configured_bytes':{'main_boot':8192,'measurement':4096,'interval':4096,'storage':6144,
+                            'network':16384,'control':8192,'supervisor':4096,
+                            'usb_recovery':16384,'ota_ephemeral':16384},
         'hardware_high_water_marks':'pending_physical_hardware'
     })
     test_result_path = root / 'test-results' / 'host' / 'results.json'

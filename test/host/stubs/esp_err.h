@@ -14,4 +14,5 @@ typedef int32_t esp_err_t;
 #define ESP_ERR_TIMEOUT 0x107
 #define ESP_ERR_INVALID_RESPONSE 0x108
 #define ESP_ERR_INVALID_CRC 0x109
+#define ESP_ERR_NVS_NOT_FOUND 0x110
 

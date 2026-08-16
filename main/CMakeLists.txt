@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "app_main.c"
+    SRCS "app_main.c" "runtime_startup.c"
     INCLUDE_DIRS "."
     REQUIRES
         pm_config
@@ -20,7 +20,8 @@ idf_component_register(
         esp_timer
         esp_system
         esp_hw_support
+        heap
         esp_driver_gpio
 )
 
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wframe-larger-than=3072)

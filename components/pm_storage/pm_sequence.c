@@ -35,13 +35,25 @@ static esp_err_t read_slot(nvs_handle_t handle, const char *key, sequence_slot_t
 
 static esp_err_t persist(pm_sequence_state_t *state)
 {
+    if (state == NULL || state->generation == UINT32_MAX) {
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_handle_t handle = 0;
     esp_err_t error = nvs_open(PM_SEQUENCE_NAMESPACE, NVS_READWRITE, &handle);
     if (error != ESP_OK) {
         return error;
     }
     uint8_t active = (uint8_t)'A';
-    (void)nvs_get_u8(handle, "active", &active);
+    const esp_err_t selector_error = nvs_get_u8(handle, "active", &active);
+    if (selector_error != ESP_OK &&
+        !(selector_error == ESP_ERR_NVS_NOT_FOUND && state->generation == 0U)) {
+        nvs_close(handle);
+        return selector_error;
+    }
+    if (selector_error == ESP_OK && active != (uint8_t)'A' && active != (uint8_t)'B') {
+        nvs_close(handle);
+        return ESP_ERR_INVALID_STATE;
+    }
     const uint8_t inactive = active == (uint8_t)'A' ? (uint8_t)'B' : (uint8_t)'A';
     const char *key = inactive == (uint8_t)'A' ? "slot_a" : "slot_b";
     sequence_slot_t slot = {.state = *state};
@@ -82,16 +94,32 @@ esp_err_t pm_sequence_load(pm_sequence_state_t *state)
     }
     sequence_slot_t a = {0};
     sequence_slot_t b = {0};
-    const bool valid_a = read_slot(handle, "slot_a", &a) == ESP_OK;
-    const bool valid_b = read_slot(handle, "slot_b", &b) == ESP_OK;
+    const esp_err_t error_a = read_slot(handle, "slot_a", &a);
+    const esp_err_t error_b = read_slot(handle, "slot_b", &b);
+    const bool valid_a = error_a == ESP_OK;
+    const bool valid_b = error_b == ESP_OK;
     nvs_close(handle);
     if (!valid_a && !valid_b) {
+        if (error_a != ESP_ERR_NVS_NOT_FOUND || error_b != ESP_ERR_NVS_NOT_FOUND) {
+            return error_a != ESP_ERR_NVS_NOT_FOUND ? error_a : error_b;
+        }
         *state = (pm_sequence_state_t){.next_sequence = 1U, .reserved_through = 0U};
         return persist(state);
+    }
+    if ((!valid_a && error_a != ESP_ERR_NVS_NOT_FOUND) ||
+        (!valid_b && error_b != ESP_ERR_NVS_NOT_FOUND)) {
+        return !valid_a && error_a != ESP_ERR_NVS_NOT_FOUND ? error_a : error_b;
+    }
+    if (valid_a && valid_b && a.state.generation == b.state.generation &&
+        memcmp(&a.state, &b.state, sizeof(a.state)) != 0) {
+        return ESP_ERR_INVALID_STATE;
     }
     *state = valid_a && (!valid_b || a.state.generation >= b.state.generation) ? a.state : b.state;
     /* Never reuse an allocated-but-not-observed reservation after reboot. */
     if (state->next_sequence <= state->reserved_through) {
+        if (state->reserved_through == UINT64_MAX) {
+            return ESP_ERR_INVALID_STATE;
+        }
         state->next_sequence = state->reserved_through + 1U;
     }
     return ESP_OK;

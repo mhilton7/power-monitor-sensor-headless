@@ -339,6 +339,31 @@ class CommandLedger:
         self.entries[command_id] = (key, fingerprint, state)
 
 
+REPLAYABLE_AFTER_REBOOT = {
+    "sync_now",
+    "diagnostics_snapshot",
+    "network_self_test",
+    "meter_self_test",
+    "storage_self_test",
+}
+
+
+def command_boot_action(command_type: str, state: str) -> str:
+    if state in {"accepted", "running"}:
+        if state == "running" and command_type == "ota_install":
+            return "reconcile_ota"
+        return "requeue" if command_type in REPLAYABLE_AFTER_REBOOT else "fail_interrupted"
+    if state == "awaiting_reboot":
+        if command_type == "reboot":
+            return "complete_reboot"
+        if command_type == "ota_install":
+            return "reconcile_ota"
+        return "fail_interrupted"
+    if state == "awaiting_heartbeat":
+        return "complete_wake" if command_type == "maintenance_sleep" else "fail_interrupted"
+    return "ignore"
+
+
 def redact(text: str) -> str:
     result = text
     for key in ("password", "secret", "token", "authorization", "cookie", "private_key", "hmac_key"):

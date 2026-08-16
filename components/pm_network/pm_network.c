@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "esp_event.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -26,7 +27,7 @@
 
 #define PM_WIFI_CONNECTED_BIT BIT0
 #define PM_WIFI_FAILED_BIT BIT1
-#define PM_NETWORK_TASK_STACK 10240U
+#define PM_NETWORK_TASK_STACK 16384U
 #define PM_REQUEST_TIMEOUT_MS 12000
 
 static EventGroupHandle_t s_wifi_events;
@@ -35,12 +36,143 @@ static portMUX_TYPE s_live_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_live_present;
 static volatile bool s_sync_requested;
 
+typedef struct {
+    char body[PM_NETWORK_BODY_MAX + 1U];
+    char response[PM_NETWORK_RESPONSE_MAX];
+    pm_network_auth_snapshot_t auth;
+} pm_network_io_workspace_t;
+
+typedef struct {
+    pm_network_context_t *network;
+    pm_network_io_workspace_t io;
+    pm_config_t startup_config;
+} pm_network_task_context_t;
+
 static void secure_zero_memory(void *value, size_t length)
 {
     volatile uint8_t *bytes = (volatile uint8_t *)value;
     while (length-- > 0U) {
         *bytes++ = 0U;
     }
+}
+
+static portMUX_TYPE s_credential_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static esp_err_t ensure_credential_mutex(pm_network_context_t *context)
+{
+    if (context == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (context->credential_mutex == NULL) {
+        taskENTER_CRITICAL(&s_credential_mutex_init_lock);
+        if (context->credential_mutex == NULL) {
+            context->credential_mutex = xSemaphoreCreateMutexStatic(&context->credential_mutex_storage);
+        }
+        taskEXIT_CRITICAL(&s_credential_mutex_init_lock);
+    }
+    return context->credential_mutex == NULL ? ESP_ERR_NO_MEM : ESP_OK;
+}
+
+static void format_device_id(const uint8_t id[PM_CONFIG_DEVICE_ID_LEN], char output[37])
+{
+    (void)snprintf(output, 37U,
+                   "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                   id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+                   id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+}
+
+esp_err_t pm_network_apply_runtime_config(pm_network_context_t *context, const pm_config_t *config)
+{
+    if (context == NULL || config == NULL || config->device_secret_len < 16U ||
+        config->device_secret_len > PM_CONFIG_SECRET_MAX ||
+        strnlen(config->server_origin, sizeof(config->server_origin)) >= sizeof(config->server_origin) ||
+        strnlen(config->ca_pem, sizeof(config->ca_pem)) >= sizeof(config->ca_pem)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char device_id_text[37] = {0};
+    uint8_t device_to_server_key[32] = {0};
+    uint8_t server_to_device_key[32] = {0};
+    format_device_id(config->device_id, device_id_text);
+    esp_err_t error = pm_hkdf_directional_keys(config->device_secret, config->device_secret_len,
+                                               device_id_text, device_to_server_key,
+                                               server_to_device_key);
+    if (error == ESP_OK) {
+        error = ensure_credential_mutex(context);
+    }
+    if (error == ESP_OK && xSemaphoreTake(context->credential_mutex, portMAX_DELAY) != pdTRUE) {
+        error = ESP_ERR_TIMEOUT;
+    } else if (error == ESP_OK) {
+        context->config = *config;
+        memcpy(context->device_id_text, device_id_text, sizeof(context->device_id_text));
+        memcpy(context->device_to_server_key, device_to_server_key,
+               sizeof(context->device_to_server_key));
+        memcpy(context->server_to_device_key, server_to_device_key,
+               sizeof(context->server_to_device_key));
+        (void)xSemaphoreGive(context->credential_mutex);
+    }
+    secure_zero_memory(device_id_text, sizeof(device_id_text));
+    secure_zero_memory(device_to_server_key, sizeof(device_to_server_key));
+    secure_zero_memory(server_to_device_key, sizeof(server_to_device_key));
+    return error;
+}
+
+esp_err_t pm_network_capture_auth_snapshot(pm_network_context_t *context,
+                                           pm_network_auth_snapshot_t *snapshot)
+{
+    if (context == NULL || snapshot == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    secure_zero_memory(snapshot, sizeof(*snapshot));
+    esp_err_t error = ensure_credential_mutex(context);
+    if (error != ESP_OK) {
+        return error;
+    }
+    if (xSemaphoreTake(context->credential_mutex, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    memcpy(snapshot->server_origin, context->config.server_origin,
+           sizeof(snapshot->server_origin));
+    memcpy(snapshot->ca_pem, context->config.ca_pem, sizeof(snapshot->ca_pem));
+    memcpy(snapshot->device_id_text, context->device_id_text,
+           sizeof(snapshot->device_id_text));
+    memcpy(snapshot->device_to_server_key, context->device_to_server_key,
+           sizeof(snapshot->device_to_server_key));
+    memcpy(snapshot->server_to_device_key, context->server_to_device_key,
+           sizeof(snapshot->server_to_device_key));
+    snapshot->config_generation = context->config.generation;
+    (void)xSemaphoreGive(context->credential_mutex);
+    if (snapshot->server_origin[0] == '\0' || snapshot->ca_pem[0] == '\0' ||
+        strlen(snapshot->device_id_text) != 36U) {
+        secure_zero_memory(snapshot, sizeof(*snapshot));
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
+void pm_network_clear_auth_snapshot(pm_network_auth_snapshot_t *snapshot)
+{
+    if (snapshot != NULL) {
+        secure_zero_memory(snapshot, sizeof(*snapshot));
+    }
+}
+
+static void zeroize_json_string(cJSON *object, const char *name)
+{
+    cJSON *item = object == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(object, name);
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        secure_zero_memory(item->valuestring, strlen(item->valuestring));
+    }
+}
+
+static pm_network_task_context_t *allocate_network_task_context(void)
+{
+    pm_network_task_context_t *task = (pm_network_task_context_t *)heap_caps_calloc(
+        1U, sizeof(*task), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (task == NULL) {
+        task = (pm_network_task_context_t *)heap_caps_calloc(
+            1U, sizeof(*task), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return task;
 }
 
 void pm_network_scheduler_init(pm_network_scheduler_t *scheduler, int64_t now_us, uint32_t heartbeat_seconds)
@@ -194,13 +326,13 @@ static esp_err_t configure_wifi(const pm_config_t *config)
         };
         error = esp_netif_set_ip_info(netif, &ip);
         if (error != ESP_OK) {
-            return error;
+            goto cleanup_wifi;
         }
         esp_netif_dns_info_t dns = {.ip.type = ESP_IPADDR_TYPE_V4};
         dns.ip.u_addr.ip4.addr = config->dns_primary;
         error = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
         if (error != ESP_OK) {
-            return error;
+            goto cleanup_wifi;
         }
     }
     error = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -210,6 +342,8 @@ static esp_err_t configure_wifi(const pm_config_t *config)
     if (error == ESP_OK) {
         error = esp_wifi_start();
     }
+cleanup_wifi:
+    secure_zero_memory(&wifi, sizeof(wifi));
     return error == ESP_ERR_WIFI_CONN ? ESP_OK : error;
 }
 
@@ -773,35 +907,45 @@ esp_err_t pm_network_serialize_permanent_loss(const pm_storage_health_t *storage
     return rendered;
 }
 
-static esp_err_t signed_request(pm_network_context_t *context, const char *method, const char *path,
-                                const char *body, char *response, size_t response_size, int *status)
+static esp_err_t signed_request(pm_network_context_t *context, pm_network_auth_snapshot_t *auth_snapshot,
+                                const char *method, const char *path, const char *body,
+                                char *response, size_t response_size, int *status)
 {
-    if (context == NULL || method == NULL || path == NULL || body == NULL || response == NULL || status == NULL) {
+    if (context == NULL || auth_snapshot == NULL || method == NULL || path == NULL || body == NULL ||
+        response == NULL || status == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     const size_t body_length = strlen(body);
     if (body_length > PM_NETWORK_BODY_MAX) {
         return ESP_ERR_INVALID_SIZE;
     }
+    esp_err_t error = pm_network_capture_auth_snapshot(context, auth_snapshot);
+    if (error != ESP_OK) {
+        return error;
+    }
     char url[PM_CONFIG_ORIGIN_MAX + 96U];
-    if (snprintf(url, sizeof(url), "%s%s", context->config.server_origin, path) >= (int)sizeof(url)) {
+    if (snprintf(url, sizeof(url), "%s%s", auth_snapshot->server_origin, path) >= (int)sizeof(url)) {
+        pm_network_clear_auth_snapshot(auth_snapshot);
         return ESP_ERR_INVALID_SIZE;
     }
     const int64_t utc_ms = (int64_t)time(NULL) * 1000;
     if (utc_ms < INT64_C(1704067200000)) {
+        pm_network_clear_auth_snapshot(auth_snapshot);
         return ESP_ERR_INVALID_STATE;
     }
     uint8_t nonce[PM_NONCE_SIZE];
     esp_fill_random(nonce, sizeof(nonce));
     pm_auth_headers_t auth;
-    esp_err_t error = pm_sign_request(context->device_to_server_key, context->device_id_text, method, path, NULL,
-                                      utc_ms, nonce, (const uint8_t *)body, body_length, &auth);
+    error = pm_sign_request(auth_snapshot->device_to_server_key, auth_snapshot->device_id_text,
+                            method, path, NULL, utc_ms, nonce, (const uint8_t *)body,
+                            body_length, &auth);
     if (error != ESP_OK) {
+        pm_network_clear_auth_snapshot(auth_snapshot);
         return error;
     }
     const esp_http_client_config_t config = {
         .url = url,
-        .cert_pem = context->config.ca_pem,
+        .cert_pem = auth_snapshot->ca_pem,
         .timeout_ms = PM_REQUEST_TIMEOUT_MS,
         .buffer_size = 2048,
         .buffer_size_tx = 2048,
@@ -810,6 +954,7 @@ static esp_err_t signed_request(pm_network_context_t *context, const char *metho
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
+        pm_network_clear_auth_snapshot(auth_snapshot);
         return ESP_ERR_NO_MEM;
     }
     esp_http_client_set_method(client, strcmp(method, "POST") == 0 ? HTTP_METHOD_POST : HTTP_METHOD_GET);
@@ -879,9 +1024,9 @@ static esp_err_t signed_request(pm_network_context_t *context, const char *metho
     if (error == ESP_OK && (*status < 200 || *status >= 300)) {
         error = ESP_ERR_INVALID_RESPONSE;
     } else if (error == ESP_OK) {
-        error = pm_verify_response(context->server_to_device_key, context->device_id_text, path, NULL, utc_ms,
-                                   &response_auth, (const uint8_t *)response, used,
-                                   &context->response_nonce_cache);
+        error = pm_verify_response(auth_snapshot->server_to_device_key, auth_snapshot->device_id_text,
+                                   path, NULL, utc_ms, &response_auth,
+                                   (const uint8_t *)response, used, &context->response_nonce_cache);
     }
     context->last_request_error = pm_network_classify_error(error, *status);
     pm_network_health_update(context, PM_HEALTH_TLS_VALIDATION_FAILURE,
@@ -890,6 +1035,7 @@ static esp_err_t signed_request(pm_network_context_t *context, const char *metho
                                  context->last_request_error == PM_TLS_ERROR_HOSTNAME);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    pm_network_clear_auth_snapshot(auth_snapshot);
     return error;
 }
 
@@ -1070,7 +1216,7 @@ static void parse_commands(pm_network_context_t *context, const char *response)
     cJSON_Delete(root);
 }
 
-static esp_err_t send_heartbeat(pm_network_context_t *context)
+static esp_err_t send_heartbeat(pm_network_context_t *context, pm_network_io_workspace_t *io)
 {
     pm_meter_sample_t live = {0};
     bool present = false;
@@ -1078,16 +1224,19 @@ static esp_err_t send_heartbeat(pm_network_context_t *context)
     live = s_live;
     present = s_live_present;
     taskEXIT_CRITICAL(&s_live_lock);
-    char body[4096];
-    esp_err_t error = pm_network_serialize_heartbeat(context, &live, present, body, sizeof(body));
+    esp_err_t error = pm_commands_lock();
+    if (error == ESP_OK) {
+        error = pm_network_serialize_heartbeat(context, &live, present, io->body, sizeof(io->body));
+        pm_commands_unlock();
+    }
     if (error != ESP_OK) {
         return error;
     }
-    char response[PM_NETWORK_RESPONSE_MAX];
     int status = 0;
-    error = signed_request(context, "POST", PM_HEARTBEAT_ENDPOINT, body, response, sizeof(response), &status);
+    error = signed_request(context, &io->auth, "POST", PM_HEARTBEAT_ENDPOINT, io->body,
+                           io->response, sizeof(io->response), &status);
     if (error == ESP_OK) {
-        cJSON *root = cJSON_Parse(response);
+        cJSON *root = cJSON_Parse(io->response);
         const cJSON *protocol = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "protocol_id");
         const cJSON *server_time = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "server_time");
         const cJSON *ack = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "highest_contiguous_sequence");
@@ -1105,36 +1254,34 @@ static esp_err_t send_heartbeat(pm_network_context_t *context)
                 context->storage->acknowledged_sequence = acknowledgement;
                 /* The authenticated 2xx response is the server's acceptance of
                  * every command result serialized in this exact request body. */
-                notify_authenticated_result_acceptance(context, body);
-                parse_commands(context, response);
+                notify_authenticated_result_acceptance(context, io->body);
+                parse_commands(context, io->response);
             }
         }
         zeroize_rotation_secrets(commands);
         cJSON_Delete(root);
     }
-    secure_zero_memory(response, sizeof(response));
     return error;
 }
 
-static esp_err_t send_backlog(pm_network_context_t *context)
+static esp_err_t send_backlog(pm_network_context_t *context, pm_network_io_workspace_t *io)
 {
     pm_storage_batch_t batch;
     esp_err_t error = pm_storage_read_batch(context->sequence->acknowledged, &batch, 3000U);
     if (error != ESP_OK || batch.count == 0U) {
         return error;
     }
-    char body[PM_NETWORK_BODY_MAX + 1U];
-    error = pm_network_serialize_reading_batch(&batch, body, sizeof(body));
+    error = pm_network_serialize_reading_batch(&batch, io->body, sizeof(io->body));
     if (error != ESP_OK) {
         return error;
     }
-    char response[PM_NETWORK_RESPONSE_MAX];
     int status = 0;
-    error = signed_request(context, "POST", PM_READINGS_ENDPOINT, body, response, sizeof(response), &status);
+    error = signed_request(context, &io->auth, "POST", PM_READINGS_ENDPOINT, io->body,
+                           io->response, sizeof(io->response), &status);
     if (error != ESP_OK) {
         return error;
     }
-    cJSON *root = cJSON_Parse(response);
+    cJSON *root = cJSON_Parse(io->response);
     const cJSON *protocol = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "protocol_id");
     const cJSON *server_time = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "server_time");
     const cJSON *ack = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "highest_contiguous_sequence");
@@ -1155,24 +1302,23 @@ static esp_err_t send_backlog(pm_network_context_t *context)
     return error;
 }
 
-static esp_err_t send_permanent_loss(pm_network_context_t *context)
+static esp_err_t send_permanent_loss(pm_network_context_t *context, pm_network_io_workspace_t *io)
 {
     if (context->storage->unavailable_first == 0U ||
         context->storage->unavailable_last <= context->permanent_loss_reported_through) {
         return ESP_ERR_NOT_FOUND;
     }
-    char body[1024];
-    esp_err_t error = pm_network_serialize_permanent_loss(context->storage, body, sizeof(body));
+    esp_err_t error = pm_network_serialize_permanent_loss(context->storage, io->body, sizeof(io->body));
     if (error != ESP_OK) {
         return error;
     }
-    char response[PM_NETWORK_RESPONSE_MAX];
     int status = 0;
-    error = signed_request(context, "POST", PM_PERMANENT_LOSS_ENDPOINT, body, response, sizeof(response), &status);
+    error = signed_request(context, &io->auth, "POST", PM_PERMANENT_LOSS_ENDPOINT, io->body,
+                           io->response, sizeof(io->response), &status);
     if (error != ESP_OK) {
         return error;
     }
-    cJSON *root = cJSON_Parse(response);
+    cJSON *root = cJSON_Parse(io->response);
     const cJSON *protocol = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "protocol_id");
     const cJSON *server_time = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "server_time");
     const cJSON *accepted = root == NULL ? NULL : cJSON_GetObjectItemCaseSensitive(root, "accepted");
@@ -1198,7 +1344,16 @@ static esp_err_t send_permanent_loss(pm_network_context_t *context)
 
 static void network_task(void *argument)
 {
-    pm_network_context_t *context = (pm_network_context_t *)argument;
+    pm_network_task_context_t *task = (pm_network_task_context_t *)argument;
+    pm_network_context_t *context = task->network;
+    if (context->start_gate != NULL &&
+        (xEventGroupWaitBits(context->start_gate, context->start_bit, pdFALSE, pdTRUE,
+                             portMAX_DELAY) & context->start_bit) == 0U) {
+        secure_zero_memory(task, sizeof(*task));
+        heap_caps_free(task);
+        vTaskDelete(NULL);
+        return;
+    }
     pm_network_scheduler_t scheduler;
     pm_network_scheduler_init(&scheduler, esp_timer_get_time(), CONFIG_PM_HEARTBEAT_SECONDS);
     uint32_t reconnect_attempt = 0U;
@@ -1230,12 +1385,18 @@ static void network_task(void *argument)
         }
         if (pm_network_heartbeat_due(&scheduler, now)) {
             scheduler.request_in_progress = true;
-            const bool success = send_heartbeat(context) == ESP_OK;
+            secure_zero_memory(&task->io, sizeof(task->io));
+            const bool success = send_heartbeat(context, &task->io) == ESP_OK;
+            secure_zero_memory(&task->io, sizeof(task->io));
             pm_network_heartbeat_complete(&scheduler, esp_timer_get_time(), success);
         } else if (s_sync_requested || pm_network_backlog_allowed(&scheduler, now, INT64_C(5000000))) {
             scheduler.request_in_progress = true;
-            if (send_permanent_loss(context) == ESP_ERR_NOT_FOUND) {
-                (void)send_backlog(context);
+            secure_zero_memory(&task->io, sizeof(task->io));
+            const esp_err_t loss_error = send_permanent_loss(context, &task->io);
+            secure_zero_memory(&task->io, sizeof(task->io));
+            if (loss_error == ESP_ERR_NOT_FOUND) {
+                (void)send_backlog(context, &task->io);
+                secure_zero_memory(&task->io, sizeof(task->io));
             }
             s_sync_requested = false;
             scheduler.request_in_progress = false;
@@ -1246,11 +1407,7 @@ static void network_task(void *argument)
 
 esp_err_t pm_network_start(pm_network_context_t *context)
 {
-    if (context == NULL || context->sequence == NULL || context->storage == NULL || context->commands == NULL ||
-        context->config.device_secret_len < 16U) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (strlen(context->device_id_text) != 36U) {
+    if (context == NULL || context->sequence == NULL || context->storage == NULL || context->commands == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     uint8_t boot_id[16];
@@ -1261,18 +1418,32 @@ esp_err_t pm_network_start(pm_network_context_t *context)
                    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                    boot_id[0], boot_id[1], boot_id[2], boot_id[3], boot_id[4], boot_id[5], boot_id[6], boot_id[7],
                    boot_id[8], boot_id[9], boot_id[10], boot_id[11], boot_id[12], boot_id[13], boot_id[14], boot_id[15]);
-    esp_err_t error = pm_hkdf_directional_keys(context->config.device_secret, context->config.device_secret_len,
-                                               context->device_id_text,
-                                               context->device_to_server_key, context->server_to_device_key);
+    pm_network_task_context_t *task = allocate_network_task_context();
+    if (task == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t error = pm_network_capture_auth_snapshot(context, &task->io.auth);
+    if (error == ESP_OK && xSemaphoreTake(context->credential_mutex, portMAX_DELAY) != pdTRUE) {
+        error = ESP_ERR_TIMEOUT;
+    } else if (error == ESP_OK) {
+        task->startup_config = context->config;
+        (void)xSemaphoreGive(context->credential_mutex);
+        error = configure_wifi(&task->startup_config);
+    }
+    secure_zero_memory(&task->startup_config, sizeof(task->startup_config));
+    pm_network_clear_auth_snapshot(&task->io.auth);
     if (error != ESP_OK) {
+        secure_zero_memory(task, sizeof(*task));
+        heap_caps_free(task);
         return error;
     }
-    error = configure_wifi(&context->config);
-    if (error != ESP_OK) {
-        return error;
+    task->network = context;
+    if (xTaskCreate(network_task, "pm_network", PM_NETWORK_TASK_STACK, task, 7U, NULL) != pdPASS) {
+        secure_zero_memory(task, sizeof(*task));
+        heap_caps_free(task);
+        return ESP_ERR_NO_MEM;
     }
-    return xTaskCreate(network_task, "pm_network", PM_NETWORK_TASK_STACK, context, 7U, NULL) == pdPASS ? ESP_OK :
-                                                                                                        ESP_ERR_NO_MEM;
+    return ESP_OK;
 }
 
 static int hex_nibble(char value)
@@ -1356,7 +1527,8 @@ esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_co
         if (enrollment_token == NULL || enrollment_token[0] == '\0') {
             error = ESP_ERR_INVALID_ARG;
         } else {
-            char body[768];
+            char body[768] = {0};
+            char response[768] = {0};
             cJSON *enrollment = cJSON_CreateObject();
             if (enrollment == NULL) {
                 error = ESP_ERR_NO_MEM;
@@ -1378,6 +1550,7 @@ esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_co
             if (error == ESP_OK && !cJSON_PrintPreallocated(enrollment, body, sizeof(body), false)) {
                 error = ESP_ERR_INVALID_SIZE;
             }
+            zeroize_json_string(enrollment, "enrollment_token");
             cJSON_Delete(enrollment);
             if (error == ESP_OK) {
                 const int length = (int)strlen(body);
@@ -1387,7 +1560,6 @@ esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_co
                 if (error == ESP_OK && esp_http_client_write(client, body, length) != length) {
                     error = ESP_ERR_HTTP_WRITE_DATA;
                 }
-                char response[768];
                 int read = -1;
                 if (error == ESP_OK) {
                     const int64_t response_length = esp_http_client_fetch_headers(client);
@@ -1408,23 +1580,43 @@ esp_err_t pm_network_provisioning_test(pm_provisioning_test_stage_t stage, pm_co
                     const cJSON *fingerprint_item = root == NULL ? NULL :
                         cJSON_GetObjectItemCaseSensitive(root, "credential_fingerprint");
                     size_t decoded = 0U;
-                    uint8_t parsed_device_id[16];
-                    if (!cJSON_IsString(protocol) || strcmp(protocol->valuestring, PM_PROTOCOL_ID) != 0 ||
-                        !cJSON_IsString(device_id) || !parse_uuid(device_id->valuestring, parsed_device_id) ||
-                        !cJSON_IsString(secret) || !cJSON_IsString(fingerprint_item) ||
-                        mbedtls_base64_decode(candidate->device_secret, sizeof(candidate->device_secret), &decoded,
-                                              (const uint8_t *)secret->valuestring, strlen(secret->valuestring)) != 0 ||
-                        decoded != 32U) {
+                    uint8_t parsed_device_id[16] = {0};
+                    uint8_t parsed_secret[PM_CONFIG_SECRET_MAX] = {0};
+                    uint8_t secret_digest[PM_SHA256_SIZE] = {0};
+                    char expected_fingerprint[PM_SHA256_HEX_SIZE + 1U] = {0};
+                    bool enrollment_valid = cJSON_IsString(protocol) &&
+                        strcmp(protocol->valuestring, PM_PROTOCOL_ID) == 0 &&
+                        cJSON_IsString(device_id) && parse_uuid(device_id->valuestring, parsed_device_id) &&
+                        cJSON_IsString(secret) && cJSON_IsString(fingerprint_item) &&
+                        mbedtls_base64_decode(parsed_secret, sizeof(parsed_secret), &decoded,
+                                              (const uint8_t *)secret->valuestring, strlen(secret->valuestring)) == 0 &&
+                        decoded == PM_CONFIG_SECRET_MAX;
+                    if (enrollment_valid) {
+                        pm_sha256(parsed_secret, decoded, secret_digest);
+                        pm_hex_lower(secret_digest, sizeof(secret_digest), expected_fingerprint,
+                                     sizeof(expected_fingerprint));
+                        enrollment_valid = strlen(fingerprint_item->valuestring) == PM_SHA256_HEX_SIZE &&
+                            pm_constant_time_equal((const uint8_t *)expected_fingerprint,
+                                                   (const uint8_t *)fingerprint_item->valuestring,
+                                                   PM_SHA256_HEX_SIZE);
+                    }
+                    if (!enrollment_valid) {
                         error = ESP_ERR_INVALID_RESPONSE;
                     } else {
                         memcpy(candidate->device_id, parsed_device_id, sizeof(candidate->device_id));
+                        memcpy(candidate->device_secret, parsed_secret, sizeof(candidate->device_secret));
                         candidate->device_secret_len = (uint8_t)decoded;
                     }
+                    secure_zero_memory(parsed_device_id, sizeof(parsed_device_id));
+                    secure_zero_memory(parsed_secret, sizeof(parsed_secret));
+                    secure_zero_memory(secret_digest, sizeof(secret_digest));
+                    secure_zero_memory(expected_fingerprint, sizeof(expected_fingerprint));
+                    zeroize_json_string(root, "device_secret");
                     cJSON_Delete(root);
-                    memset(response, 0, sizeof(response));
                 }
             }
-            memset(body, 0, sizeof(body));
+            secure_zero_memory(response, sizeof(response));
+            secure_zero_memory(body, sizeof(body));
         }
     }
     esp_http_client_cleanup(client);

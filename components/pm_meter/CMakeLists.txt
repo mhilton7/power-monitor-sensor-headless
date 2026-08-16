@@ -3,4 +3,4 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES esp_driver_uart esp_timer pm_config
 )
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wframe-larger-than=3072)

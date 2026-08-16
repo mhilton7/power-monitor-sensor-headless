@@ -3,4 +3,4 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES pm_config pm_measurement fatfs sdmmc driver nvs_flash esp_hw_support
 )
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wframe-larger-than=3072)

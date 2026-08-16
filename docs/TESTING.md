@@ -6,7 +6,26 @@ Run all host evidence from the repository root:
 .\tools\Run-HostTests.ps1
 ```
 
-The runner executes 59 Python unit/model tests, the named 36-case power/config/format/OTA/SD/PZEM/network/server/command fault matrix, and an accelerated 120-day integration. The integration covers 10,368,000 one-second samples, 172,800 durable intervals, randomized outages/restarts/corruption, backlog/ack, commands, OTA, and time trust. CI additionally compiles and runs 63 pure production C parser/aggregation/journal assertions with `-Wall -Wextra -Werror`, repeats them under ASan/UBSan, and builds the entire ESP-IDF image.
+The runner first executes the native PowerShell provisioning UX regressions,
+then the full discovered Python host suite, the named 36-case
+power/config/format/OTA/SD/PZEM/network/server/command fault matrix, and an
+accelerated 120-day integration. The PowerShell cases exercise HTTPS-origin
+canonicalization/rejection, local `tls-ca.crt` validation and device size
+limits before COM access, Windows semaphore/read/write timeout classification,
+one ordinary read timeout followed by a delayed device response, the actionable
+final request deadline, the pre-attempt rollback, unconfirmed commit, and
+confirmed-commit reboot boundaries, reset/log guidance, and secret redaction. They can
+also run directly:
+
+```powershell
+.\test\powershell\ProvisioningUx.Tests.ps1
+```
+
+The integration covers 10,368,000 one-second samples, 172,800 durable
+intervals, randomized outages/restarts/corruption, backlog/ack, commands, OTA,
+and time trust. CI additionally compiles and runs 63 pure production C
+parser/aggregation/journal assertions with `-Wall -Wextra -Werror`, repeats
+them under ASan/UBSan, and builds the entire ESP-IDF image.
 
 Assertions include PZEM request/CRC/ranges; energy reset/rollover; missing-vs-zero; deterministic record/CRC; trailing recovery/index/retention; A/B config and sequence reservation; ack monotonicity/card replacement; state/backoff/heartbeat priority; TLS classification; HMAC canonicalization/HKDF/replay; command expiry/idempotency/prepare; credential-rotation crashes at every durable boundary, old/new key transition, expiry/cancel/zeroization; OTA hash/compatibility/rollback; COM transaction/redaction; no old-data replay; and no deadlock/permanent latch.
 
