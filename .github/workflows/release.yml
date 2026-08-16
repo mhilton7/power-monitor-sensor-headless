@@ -268,7 +268,7 @@ jobs:
           test-results/release-input/hardware-certification.json
           --firmware-commit "${{ needs.tag_authenticity.outputs.source_commit }}"
       - name: Upload immutable release hardware input
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hardware-certification-input
           path: test-results/release-input/hardware-certification*.json
@@ -440,7 +440,7 @@ jobs:
           print(json.dumps({'result': 'pass', 'artifact_count': len(actual_names),
                             'firmware_sha256': firmware_digest}))
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: power-monitor-sensor-${{ github.ref_name }}
           path: release/out/${{ needs.tag_authenticity.outputs.version }}/*
