@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-set(PM_FIRMWARE_VERSION "0.1.0-rc.11" CACHE STRING
+set(PM_FIRMWARE_VERSION "0.1.0-rc.12" CACHE STRING
     "SemVer injected by the authenticated release-tag workflow")
 if(NOT PM_FIRMWARE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-rc\\.[1-9][0-9]*)?$")
     message(FATAL_ERROR "PM_FIRMWARE_VERSION is not a supported release SemVer")
