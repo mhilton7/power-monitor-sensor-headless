@@ -187,10 +187,10 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc13_release_identity_is_coordinated_with_server_rc13(self) -> None:
-        expected_tag = "v0.1.0-rc.13"
+    def test_rc14_release_identity_is_coordinated_with_server_rc14(self) -> None:
+        expected_tag = "v0.1.0-rc.14"
         expected_openapi_sha256 = (
-            "253494a6fbbf7cdb06467ea3bb670c748f5cb95a547770dce39a53b6e6624518"
+            "26dbc5cf443cb63a29ca1f22bc069b566afa4eb026ed5c86023a81ffd299d1fe"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(
