@@ -67,6 +67,8 @@ typedef struct {
     uint64_t bytes_free;
     uint32_t corrupt_records;
     uint32_t quarantined_segments;
+    uint32_t inventory_scanned_files;
+    bool inventory_complete;
     bool read_only;
 } pm_storage_health_t;
 
@@ -106,6 +108,7 @@ esp_err_t pm_sequence_raise_floor(pm_sequence_state_t *state, uint64_t floor, ui
 esp_err_t pm_storage_start(const uint8_t device_id[16], pm_storage_health_t *health);
 esp_err_t pm_storage_append(const pm_journal_record_t *record, uint32_t timeout_ms);
 esp_err_t pm_storage_read_batch(uint64_t after_sequence, pm_storage_batch_t *batch, uint32_t timeout_ms);
+esp_err_t pm_storage_refresh_inventory(uint32_t timeout_ms);
 esp_err_t pm_storage_flush(uint32_t timeout_ms);
 esp_err_t pm_storage_prepare_format(uint64_t now_us, uint64_t expires_us, const uint8_t token[16],
                                     pm_format_transaction_t *transaction);

@@ -10,6 +10,7 @@
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_random.h"
@@ -22,6 +23,7 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "mbedtls/base64.h"
+#include "pm_backlog_policy.h"
 #include "pm_command_envelope.h"
 #include "pm_diagnostics.h"
 #include "pm_http_response.h"
@@ -33,6 +35,7 @@
 #define PM_REQUEST_TIMEOUT_MS 12000
 
 static EventGroupHandle_t s_wifi_events;
+static const char *TAG = "pm_network";
 static pm_meter_sample_t s_live;
 static portMUX_TYPE s_live_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_live_present;
@@ -40,6 +43,7 @@ static volatile bool s_sync_requested;
 
 typedef struct {
     char body[PM_NETWORK_BODY_MAX + 1U];
+    char batch_measure[PM_NETWORK_BATCH_MEASURE_MAX + 1U];
     char response[PM_NETWORK_RESPONSE_MAX];
     pm_network_auth_snapshot_t auth;
 } pm_network_io_workspace_t;
@@ -197,6 +201,7 @@ bool pm_network_backlog_allowed(const pm_network_scheduler_t *scheduler, int64_t
                                 int64_t worst_case_request_us)
 {
     return scheduler != NULL && !scheduler->request_in_progress &&
+           now_us >= scheduler->next_backlog_attempt_us &&
            now_us + worst_case_request_us < scheduler->next_heartbeat_us;
 }
 
@@ -1279,16 +1284,98 @@ static esp_err_t send_heartbeat(pm_network_context_t *context, pm_network_io_wor
     return error;
 }
 
-static esp_err_t send_backlog(pm_network_context_t *context, pm_network_io_workspace_t *io)
+typedef struct {
+    const pm_storage_batch_t *batch;
+    char *measure;
+    size_t measure_capacity;
+    esp_err_t serialization_error;
+} pm_backlog_probe_context_t;
+
+static pm_backlog_probe_status_t probe_reading_batch(size_t record_count,
+                                                     size_t *serialized_bytes,
+                                                     void *opaque)
+{
+    pm_backlog_probe_context_t *probe = (pm_backlog_probe_context_t *)opaque;
+    if (probe == NULL || probe->batch == NULL || probe->measure == NULL ||
+        serialized_bytes == NULL || record_count == 0U ||
+        record_count > probe->batch->count) {
+        return PM_BACKLOG_PROBE_FAILED;
+    }
+    pm_storage_batch_t candidate = *probe->batch;
+    candidate.count = record_count;
+    probe->measure[0] = '\0';
+    probe->serialization_error = pm_network_serialize_reading_batch(
+        &candidate, probe->measure, probe->measure_capacity);
+    if (probe->serialization_error == ESP_ERR_INVALID_SIZE) {
+        *serialized_bytes = probe->measure_capacity;
+        return PM_BACKLOG_PROBE_TOO_LARGE;
+    }
+    if (probe->serialization_error != ESP_OK) {
+        *serialized_bytes = 0U;
+        return PM_BACKLOG_PROBE_FAILED;
+    }
+    *serialized_bytes = strnlen(probe->measure, probe->measure_capacity);
+    if (*serialized_bytes >= probe->measure_capacity) {
+        probe->serialization_error = ESP_ERR_INVALID_SIZE;
+        return PM_BACKLOG_PROBE_TOO_LARGE;
+    }
+    return PM_BACKLOG_PROBE_OK;
+}
+
+static esp_err_t send_backlog(pm_network_context_t *context,
+                              pm_network_scheduler_t *scheduler,
+                              pm_network_io_workspace_t *io)
 {
     pm_storage_batch_t batch;
     esp_err_t error = pm_storage_read_batch(context->sequence->acknowledged, &batch, 3000U);
-    if (error != ESP_OK || batch.count == 0U) {
-        return error;
-    }
-    error = pm_network_serialize_reading_batch(&batch, io->body, sizeof(io->body));
     if (error != ESP_OK) {
         return error;
+    }
+    if (batch.count == 0U) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    const size_t configured = scheduler->adaptive_batch_records;
+    scheduler->adaptive_batch_records = (uint32_t)pm_backlog_bounded_record_limit(
+        configured, PM_STORAGE_BATCH_MAX);
+    pm_backlog_probe_context_t probe = {
+        .batch = &batch,
+        .measure = io->batch_measure,
+        .measure_capacity = sizeof(io->batch_measure),
+        .serialization_error = ESP_OK,
+    };
+    pm_backlog_plan_t plan = {0};
+    const pm_backlog_plan_status_t plan_status = pm_backlog_select_largest_fitting(
+        batch.count, scheduler->adaptive_batch_records, PM_STORAGE_BATCH_MAX,
+        sizeof(io->body), probe_reading_batch, &probe, &plan);
+    if (plan_status == PM_BACKLOG_PLAN_SINGLE_RECORD_TOO_LARGE) {
+        ESP_LOGE(TAG,
+                 "BACKLOG_SINGLE_RECORD_TOO_LARGE sequence=%llu measured_bytes_at_least=%u body_limit=%u",
+                 (unsigned long long)batch.records[0].sequence,
+                 (unsigned)plan.serialized_bytes, (unsigned)PM_NETWORK_BODY_MAX);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (plan_status != PM_BACKLOG_PLAN_OK) {
+        ESP_LOGW(TAG,
+                 "BACKLOG_SERIALIZATION_FAILED available=%u configured=%u error=%s",
+                 (unsigned)batch.count, (unsigned)scheduler->adaptive_batch_records,
+                 esp_err_to_name(probe.serialization_error));
+        return probe.serialization_error == ESP_OK ? ESP_FAIL : probe.serialization_error;
+    }
+    if (plan.serialized_bytes > PM_NETWORK_BODY_MAX ||
+        plan.serialized_bytes + 1U > sizeof(io->body)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(io->body, io->batch_measure, plan.serialized_bytes + 1U);
+    const uint64_t first_sequence = batch.records[0].sequence;
+    const uint64_t last_sequence = batch.records[plan.selected_records - 1U].sequence;
+    if (plan.reduced) {
+        ESP_LOGI(TAG,
+                 "BACKLOG_BATCH_REDUCED configured=%u available=%u candidate=%u selected=%u first=%llu last=%llu measured=%u actual=%u body_limit=%u",
+                 (unsigned)configured, (unsigned)batch.count,
+                 (unsigned)plan.candidate_records, (unsigned)plan.selected_records,
+                 (unsigned long long)first_sequence, (unsigned long long)last_sequence,
+                 (unsigned)plan.serialized_bytes, (unsigned)strlen(io->body),
+                 (unsigned)PM_NETWORK_BODY_MAX);
     }
     int status = 0;
     error = signed_request(context, &io->auth, "POST", PM_READINGS_ENDPOINT, io->body,
@@ -1313,20 +1400,82 @@ static esp_err_t send_backlog(pm_network_context_t *context, pm_network_io_works
     error = pm_sequence_acknowledge(context->sequence, acknowledgement);
     if (error == ESP_OK) {
         context->storage->acknowledged_sequence = acknowledgement;
+        ESP_LOGI(TAG, "BACKLOG_ACK_ADVANCED first=%llu last=%llu server_ack=%llu",
+                 (unsigned long long)first_sequence,
+                 (unsigned long long)last_sequence,
+                 (unsigned long long)acknowledgement);
     }
     return error;
 }
 
-static esp_err_t send_permanent_loss(pm_network_context_t *context, pm_network_io_workspace_t *io)
+static esp_err_t send_permanent_loss(pm_network_context_t *context,
+                                     uint32_t report_attempt,
+                                     pm_network_io_workspace_t *io)
 {
-    if (context->storage->unavailable_first == 0U ||
-        context->storage->unavailable_last <= context->permanent_loss_reported_through) {
+    const bool possible_prefix =
+        context->sequence->acknowledged != UINT64_MAX &&
+        context->storage->oldest_sequence > context->sequence->acknowledged + 1U;
+    const bool possible_known_loss =
+        context->storage->unavailable_first != 0U &&
+        context->storage->unavailable_last > context->permanent_loss_reported_through;
+    if ((possible_prefix || possible_known_loss || !context->storage->inventory_complete) &&
+        pm_storage_refresh_inventory(3000U) != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "MISSING_PREFIX_NOT_CONFIRMED attempt=%u server_ack=%llu storage_status=%u inventory_complete=%u",
+                 (unsigned)report_attempt,
+                 (unsigned long long)context->sequence->acknowledged,
+                 (unsigned)context->storage->status,
+                 context->storage->inventory_complete ? 1U : 0U);
+        return ESP_ERR_INVALID_STATE;
+    }
+    const bool storage_readable = context->storage->status == PM_STORAGE_READY ||
+                                  context->storage->status == PM_STORAGE_FULL ||
+                                  context->storage->status == PM_STORAGE_READ_ONLY;
+    pm_missing_prefix_t prefix = {0};
+    const pm_missing_prefix_status_t prefix_status = pm_backlog_detect_missing_prefix(
+        context->sequence->acknowledged, storage_readable,
+        context->storage->inventory_complete, context->storage->oldest_sequence,
+        &prefix);
+    if (prefix_status == PM_MISSING_PREFIX_NOT_CONFIRMED) {
+        ESP_LOGW(TAG,
+                 "MISSING_PREFIX_NOT_CONFIRMED attempt=%u server_ack=%llu earliest=%llu storage_status=%u inventory_complete=%u scanned_files=%u",
+                 (unsigned)report_attempt,
+                 (unsigned long long)context->sequence->acknowledged,
+                 (unsigned long long)context->storage->oldest_sequence,
+                 (unsigned)context->storage->status,
+                 context->storage->inventory_complete ? 1U : 0U,
+                 (unsigned)context->storage->inventory_scanned_files);
+        return ESP_ERR_INVALID_STATE;
+    }
+    pm_storage_health_t report = *context->storage;
+    if (prefix_status == PM_MISSING_PREFIX_CONFIRMED) {
+        report.unavailable_first = prefix.first_sequence;
+        report.unavailable_last = prefix.last_sequence;
+        ESP_LOGI(TAG,
+                 "MISSING_PREFIX_DETECTED attempt=%u server_ack=%llu earliest=%llu first=%llu last=%llu count=%llu scanned_files=%u",
+                 (unsigned)report_attempt,
+                 (unsigned long long)context->sequence->acknowledged,
+                 (unsigned long long)context->storage->oldest_sequence,
+                 (unsigned long long)prefix.first_sequence,
+                 (unsigned long long)prefix.last_sequence,
+                 (unsigned long long)prefix.count,
+                 (unsigned)context->storage->inventory_scanned_files);
+    } else if (!context->storage->inventory_complete) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (report.unavailable_first == 0U ||
+        report.unavailable_last <= context->permanent_loss_reported_through) {
         return ESP_ERR_NOT_FOUND;
     }
-    esp_err_t error = pm_network_serialize_permanent_loss(context->storage, io->body, sizeof(io->body));
+    const uint64_t report_first = report.unavailable_first;
+    const uint64_t report_last = report.unavailable_last;
+    esp_err_t error = pm_network_serialize_permanent_loss(&report, io->body, sizeof(io->body));
     if (error != ESP_OK) {
         return error;
     }
+    ESP_LOGI(TAG, "MISSING_PREFIX_REPORT_SENT attempt=%u first=%llu last=%llu",
+             (unsigned)report_attempt,
+             (unsigned long long)report_first, (unsigned long long)report_last);
     int status = 0;
     error = signed_request(context, &io->auth, "POST", PM_PERMANENT_LOSS_ENDPOINT, io->body,
                            io->response, sizeof(io->response), &status);
@@ -1349,12 +1498,50 @@ static esp_err_t send_permanent_loss(pm_network_context_t *context, pm_network_i
     }
     const uint64_t acknowledgement = (uint64_t)ack->valuedouble;
     cJSON_Delete(root);
+    if (acknowledgement < report_last) {
+        ESP_LOGW(TAG,
+                 "MISSING_PREFIX_REJECTED first=%llu last=%llu server_ack=%llu",
+                 (unsigned long long)report_first,
+                 (unsigned long long)report_last,
+                 (unsigned long long)acknowledgement);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     error = pm_sequence_acknowledge(context->sequence, acknowledgement);
     if (error == ESP_OK) {
         context->storage->acknowledged_sequence = acknowledgement;
-        context->permanent_loss_reported_through = context->storage->unavailable_last;
+        context->permanent_loss_reported_through = report_last;
+        ESP_LOGI(TAG,
+                 "MISSING_PREFIX_ACCEPTED first=%llu last=%llu server_ack=%llu",
+                 (unsigned long long)report_first,
+                 (unsigned long long)report_last,
+                 (unsigned long long)acknowledgement);
     }
     return error;
+}
+
+static void backlog_work_complete(pm_network_scheduler_t *scheduler, int64_t now_us,
+                                  esp_err_t result)
+{
+    if (scheduler == NULL) {
+        return;
+    }
+    if (result == ESP_OK) {
+        scheduler->backlog_retry_attempt = 0U;
+        scheduler->next_backlog_attempt_us = now_us;
+        return;
+    }
+    if (result == ESP_ERR_NOT_FOUND) {
+        scheduler->backlog_retry_attempt = 0U;
+        scheduler->next_backlog_attempt_us = now_us + INT64_C(1000000);
+        return;
+    }
+    const uint32_t delay_ms = pm_network_reconnect_delay_ms(
+        scheduler->backlog_retry_attempt++, esp_random());
+    scheduler->next_backlog_attempt_us =
+        now_us + (int64_t)delay_ms * INT64_C(1000);
+    ESP_LOGW(TAG, "BACKLOG_UPLOAD_RETRY error=%s attempt=%u delay_ms=%u",
+             esp_err_to_name(result), (unsigned)scheduler->backlog_retry_attempt,
+             (unsigned)delay_ms);
 }
 
 static void network_task(void *argument)
@@ -1407,12 +1594,18 @@ static void network_task(void *argument)
         } else if (s_sync_requested || pm_network_backlog_allowed(&scheduler, now, INT64_C(5000000))) {
             scheduler.request_in_progress = true;
             secure_zero_memory(&task->io, sizeof(task->io));
-            const esp_err_t loss_error = send_permanent_loss(context, &task->io);
+            const uint32_t loss_attempt = scheduler.backlog_retry_attempt + 1U;
+            const esp_err_t loss_error = send_permanent_loss(context, loss_attempt, &task->io);
             secure_zero_memory(&task->io, sizeof(task->io));
+            esp_err_t work_error = loss_error;
             if (loss_error == ESP_ERR_NOT_FOUND) {
-                (void)send_backlog(context, &task->io);
+                work_error = send_backlog(context, &scheduler, &task->io);
                 secure_zero_memory(&task->io, sizeof(task->io));
+            } else if (loss_error != ESP_OK) {
+                ESP_LOGW(TAG, "MISSING_PREFIX_RETRY attempt=%u error=%s",
+                         (unsigned)loss_attempt, esp_err_to_name(loss_error));
             }
+            backlog_work_complete(&scheduler, esp_timer_get_time(), work_error);
             s_sync_requested = false;
             scheduler.request_in_progress = false;
         }

@@ -73,6 +73,16 @@ class PureCRegressionTests(unittest.TestCase):
             ],
         )
 
+    def test_adaptive_backlog_and_missing_prefix_policy(self) -> None:
+        self.compile_and_run(
+            "test_pm_backlog_policy",
+            sources=[
+                "test/host/test_pm_backlog_policy.c",
+                "components/pm_network/pm_backlog_policy.c",
+            ],
+            include_directories=["components/pm_network/include"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

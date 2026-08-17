@@ -187,7 +187,7 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc14_release_identity_is_coordinated_with_server_rc14(self) -> None:
+    def test_rc15_firmware_remains_compatible_with_server_rc14(self) -> None:
         expected_tag = "v0.1.0-rc.14"
         expected_openapi_sha256 = (
             "26dbc5cf443cb63a29ca1f22bc069b566afa4eb026ed5c86023a81ffd299d1fe"
