@@ -16,8 +16,8 @@ The version check must print `v6.0.2`. Debug/test/simulated overlays exist for t
 To assemble the local RC artifact pack:
 
 ```powershell
-.\tools\Build-Release.ps1 -Version 0.1.0-rc.11 -BuildNumber 1
-.\tools\Flash-PowerMeterSensor.ps1 -Port COM7 -ArtifactDirectory .\release\out\0.1.0-rc.11
+.\tools\Build-Release.ps1 -Version 0.1.0-rc.12 -BuildNumber 1
+.\tools\Flash-PowerMeterSensor.ps1 -Port COM7 -ArtifactDirectory .\release\out\0.1.0-rc.12
 ```
 
 The flash utility verifies every SHA-256 in `flash_args.json`, then writes bootloader at `0x0`, partition table at `0x8000`, OTA data at `0x2D000`, and app at `0x40000`. It does not erase the 136 KiB NVS partition. `merged-flash.bin` is an offline recovery image; use the verified per-image script for normal flashing.
