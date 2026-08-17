@@ -78,6 +78,11 @@ jobs:
             test/host/test_pm_ota_policy.c components/pm_ota/pm_ota_version.c \
             components/pm_network/pm_command_envelope.c -o "$RUNNER_TEMP/test_pm_ota_policy"
           "$RUNNER_TEMP/test_pm_ota_policy"
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Icomponents/pm_network/include \
+            test/host/test_pm_backlog_policy.c components/pm_network/pm_backlog_policy.c \
+            -o "$RUNNER_TEMP/test_pm_backlog_policy"
+          "$RUNNER_TEMP/test_pm_backlog_policy"
       - name: Run production pure-C tests under ASan and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
@@ -102,6 +107,17 @@ jobs:
           test/host/test_pm_meter_io.c components/pm_meter/pm_meter.c
           components/pm_meter/pm_meter_pzem_v4_classic.c
           -o "$RUNNER_TEMP/test_pm_meter_io_sanitized" && "$RUNNER_TEMP/test_pm_meter_io_sanitized"
+      - name: Run backlog policy regression under ASan and UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: >-
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror
+          -fsanitize=address,undefined -fno-omit-frame-pointer
+          -Icomponents/pm_network/include
+          test/host/test_pm_backlog_policy.c components/pm_network/pm_backlog_policy.c
+          -o "$RUNNER_TEMP/test_pm_backlog_policy_sanitized" &&
+          "$RUNNER_TEMP/test_pm_backlog_policy_sanitized"
 
   esp-idf-build:
     runs-on: ubuntu-24.04

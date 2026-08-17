@@ -21,6 +21,7 @@ extern "C" {
 
 #define PM_NETWORK_RESPONSE_MAX 4096U
 #define PM_NETWORK_BODY_MAX 8192U
+#define PM_NETWORK_BATCH_MEASURE_MAX 16384U
 #define PM_ENROLL_ENDPOINT "/api/v1/devices/enroll"
 #define PM_HEARTBEAT_ENDPOINT "/api/v1/device/heartbeat"
 #define PM_READINGS_ENDPOINT "/api/v1/device/readings"
@@ -46,6 +47,8 @@ typedef struct {
     int64_t last_heartbeat_us;
     uint32_t consecutive_missed;
     uint32_t adaptive_batch_records;
+    uint32_t backlog_retry_attempt;
+    int64_t next_backlog_attempt_us;
     bool request_in_progress;
 } pm_network_scheduler_t;
 

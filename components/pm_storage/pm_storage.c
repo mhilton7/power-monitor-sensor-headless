@@ -31,6 +31,7 @@ typedef enum {
     STORAGE_MESSAGE_FORMAT,
     STORAGE_MESSAGE_RECOVER_AUTHENTICATED_FORMAT,
     STORAGE_MESSAGE_READ_BATCH,
+    STORAGE_MESSAGE_REFRESH_INVENTORY,
 } storage_message_type_t;
 
 typedef struct {
@@ -456,8 +457,7 @@ static esp_err_t scan_segment(FILE *file, pm_storage_batch_t *batch, pm_storage_
             }
             const long recovered = next_valid_record(file, offset + 1L, end, bytes, &record);
             if (recovered < 0) {
-                report_unavailable_range(health, expected, expected);
-                break;
+                return ESP_ERR_INVALID_CRC;
             }
             report_unavailable_range(health, expected, record.sequence > expected ? record.sequence - 1U : expected);
             offset = recovered;
@@ -480,8 +480,14 @@ static esp_err_t scan_segment(FILE *file, pm_storage_batch_t *batch, pm_storage_
         expected = record.sequence == UINT64_MAX ? UINT64_MAX : record.sequence + 1U;
         offset += (long)sizeof(bytes);
     }
-    if (offset != end && corrupt != NULL) {
-        *corrupt = true;
+    if (ferror(file) != 0) {
+        return ESP_FAIL;
+    }
+    if (offset != end) {
+        if (corrupt != NULL) {
+            *corrupt = true;
+        }
+        return ESP_ERR_INVALID_SIZE;
     }
     return ESP_OK;
 }
@@ -491,30 +497,54 @@ static esp_err_t read_batch_owner(uint64_t cursor, pm_storage_batch_t *batch)
     if (batch == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_health == NULL || !s_health->inventory_complete ||
+        (s_health->status != PM_STORAGE_READY && s_health->status != PM_STORAGE_FULL &&
+         s_health->status != PM_STORAGE_READ_ONLY)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     *batch = (pm_storage_batch_t){.after_sequence = cursor};
     DIR *directory = opendir(PM_JOURNAL_DIR);
     if (directory == NULL) {
         return ESP_FAIL;
     }
+    esp_err_t result = ESP_OK;
     struct dirent *entry = NULL;
-    while ((entry = readdir(directory)) != NULL) {
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                result = ESP_FAIL;
+            }
+            break;
+        }
         if (strncmp(entry->d_name, "seg_", 4U) != 0 && strcmp(entry->d_name, "current.tmp") != 0 &&
             strncmp(entry->d_name, "quarantine_", 11U) != 0) {
             continue;
         }
         char path[256];
         if (!journal_path(path, entry->d_name)) {
-            continue;
+            result = ESP_ERR_INVALID_SIZE;
+            break;
         }
         FILE *file = fopen(path, "rb");
-        if (file != NULL) {
-            bool corrupt = false;
-            (void)scan_segment(file, batch, s_health, &corrupt);
-            fclose(file);
+        if (file == NULL) {
+            result = ESP_FAIL;
+            break;
+        }
+        bool corrupt = false;
+        result = scan_segment(file, batch, NULL, &corrupt);
+        fclose(file);
+        if (result != ESP_OK) {
+            break;
         }
     }
     closedir(directory);
-    return ESP_OK;
+    if (result != ESP_OK) {
+        s_health->inventory_complete = false;
+        s_health->status = PM_STORAGE_IO_ERROR;
+    }
+    return result;
 }
 
 static esp_err_t recover_current(void)
@@ -591,31 +621,69 @@ esp_err_t pm_storage_rebuild_index(pm_storage_health_t *health)
     if (health == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    health->inventory_complete = false;
+    pm_storage_health_t inventory = *health;
+    inventory.oldest_sequence = 0U;
+    inventory.newest_sequence = 0U;
+    inventory.unavailable_first = 0U;
+    inventory.unavailable_last = 0U;
+    inventory.corrupt_records = 0U;
+    inventory.quarantined_segments = 0U;
+    inventory.inventory_scanned_files = 0U;
+    inventory.inventory_complete = false;
     DIR *directory = opendir(PM_JOURNAL_DIR);
     if (directory == NULL) {
         return ESP_FAIL;
     }
+    esp_err_t result = ESP_OK;
     struct dirent *entry = NULL;
-    while ((entry = readdir(directory)) != NULL) {
-        if (strncmp(entry->d_name, "seg_", 4U) != 0 && strncmp(entry->d_name, "quarantine_", 11U) != 0) {
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL) {
+            if (errno != 0) {
+                result = ESP_FAIL;
+            }
+            break;
+        }
+        if (strncmp(entry->d_name, "seg_", 4U) != 0 && strcmp(entry->d_name, "current.tmp") != 0 &&
+            strncmp(entry->d_name, "quarantine_", 11U) != 0) {
             continue;
         }
         char path[256];
         if (!journal_path(path, entry->d_name)) {
-            continue;
+            result = ESP_ERR_INVALID_SIZE;
+            break;
         }
         FILE *file = fopen(path, "rb");
         if (file == NULL) {
-            continue;
+            result = ESP_FAIL;
+            break;
         }
         bool corrupt = false;
-        const esp_err_t scan_error = scan_segment(file, NULL, health, &corrupt);
+        const esp_err_t scan_error = scan_segment(file, NULL, &inventory, &corrupt);
+        inventory.inventory_scanned_files++;
         if (scan_error != ESP_OK || corrupt) {
-            health->quarantined_segments++;
+            inventory.quarantined_segments++;
         }
         fclose(file);
+        if (scan_error != ESP_OK) {
+            result = scan_error;
+            break;
+        }
     }
     closedir(directory);
+    if (result != ESP_OK) {
+        return result;
+    }
+    health->oldest_sequence = inventory.oldest_sequence;
+    health->newest_sequence = inventory.newest_sequence;
+    health->unavailable_first = inventory.unavailable_first;
+    health->unavailable_last = inventory.unavailable_last;
+    health->corrupt_records = inventory.corrupt_records;
+    health->quarantined_segments = inventory.quarantined_segments;
+    health->inventory_scanned_files = inventory.inventory_scanned_files;
+    health->inventory_complete = true;
     return ESP_OK;
 }
 
@@ -682,6 +750,11 @@ static void storage_task(void *context)
             result = format_storage(NULL, true);
         } else if (message.type == STORAGE_MESSAGE_READ_BATCH) {
             result = read_batch_owner(message.cursor, message.batch);
+        } else if (message.type == STORAGE_MESSAGE_REFRESH_INVENTORY) {
+            result = pm_storage_rebuild_index(s_health);
+            if (result != ESP_OK) {
+                s_health->inventory_complete = false;
+            }
         }
         if (message.caller != NULL) {
             (void)xTaskNotify(message.caller, (uint32_t)result, eSetValueWithOverwrite);
@@ -762,6 +835,12 @@ esp_err_t pm_storage_read_batch(uint64_t after_sequence, pm_storage_batch_t *bat
         .cursor = after_sequence,
         .batch = batch,
     };
+    return send_and_wait(&message, timeout_ms);
+}
+
+esp_err_t pm_storage_refresh_inventory(uint32_t timeout_ms)
+{
+    storage_message_t message = {.type = STORAGE_MESSAGE_REFRESH_INVENTORY};
     return send_and_wait(&message, timeout_ms);
 }
 
