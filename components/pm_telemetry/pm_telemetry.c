@@ -100,3 +100,20 @@ bool pm_telemetry_backoff_due(const pm_telemetry_backoff_t *backoff, int64_t now
 {
     return backoff != NULL && now_us >= backoff->next_attempt_us;
 }
+
+int64_t pm_telemetry_next_fixed_deadline(int64_t previous_deadline_us, int64_t now_us,
+                                         int64_t period_us)
+{
+    if (previous_deadline_us < 0 || now_us < 0 || period_us <= 0) {
+        return now_us;
+    }
+    if (previous_deadline_us > now_us) {
+        return previous_deadline_us;
+    }
+    const int64_t elapsed_us = now_us - previous_deadline_us;
+    const int64_t periods = elapsed_us / period_us + 1;
+    if (periods > (INT64_MAX - previous_deadline_us) / period_us) {
+        return INT64_MAX;
+    }
+    return previous_deadline_us + periods * period_us;
+}

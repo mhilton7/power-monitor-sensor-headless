@@ -92,11 +92,27 @@ static void test_bounded_backoff_and_reset(void)
     CHECK(pm_telemetry_backoff_due(&backoff, 5000));
 }
 
+static void test_fixed_deadline_does_not_accumulate_request_latency(void)
+{
+    const int64_t period = INT64_C(5000000);
+    int64_t deadline = INT64_C(1000000);
+    deadline = pm_telemetry_next_fixed_deadline(deadline, INT64_C(1250000), period);
+    CHECK(deadline == INT64_C(6000000));
+    deadline = pm_telemetry_next_fixed_deadline(deadline, INT64_C(6450000), period);
+    CHECK(deadline == INT64_C(11000000));
+    deadline = pm_telemetry_next_fixed_deadline(deadline, INT64_C(23000000), period);
+    CHECK(deadline == INT64_C(26000000));
+    CHECK(pm_telemetry_next_fixed_deadline(INT64_C(5000), INT64_C(4000), period) ==
+          INT64_C(5000));
+    CHECK(pm_telemetry_next_fixed_deadline(INT64_C(0), INT64_MAX, period) == INT64_MAX);
+}
+
 int main(void)
 {
     test_latest_value_wins();
     test_memory_is_strictly_bounded();
     test_bounded_backoff_and_reset();
+    test_fixed_deadline_does_not_accumulate_request_latency();
     printf("{\"suite\":\"pm_telemetry\",\"failures\":%u}\n", failures);
     return failures == 0U ? 0 : 1;
 }
