@@ -397,7 +397,7 @@ jobs:
             --download-base "https://github.com/mhilton7/power-monitor-sensor-headless/releases/download/$GITHUB_REF_NAME" \
             --hardware-status "test-results/release-input/$HARDWARE_FILENAME" \
             --configuration "$CONFIGURATION" \
-            --server-tag "v0.1.0-rc.19" \
+            --server-tag "v0.1.0-rc.20" \
             --dependency-audit-report test-results/security/dependency-audit.json
       - name: Verify the complete release artifact set
         env:
