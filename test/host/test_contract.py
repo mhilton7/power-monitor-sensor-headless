@@ -41,7 +41,7 @@ class ServerContractTests(unittest.TestCase):
         self.validate("device-destructive-commands.json", "device-destructive-commands.schema.json")
         self.validate("device-credential-rotation.json", "device-credential-rotation.schema.json")
 
-    def test_manifest_has_only_inspected_post_endpoints(self) -> None:
+    def test_legacy_manifest_is_preserved_and_active_runtime_uses_only_stateless_posts(self) -> None:
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
         self.assertEqual(
@@ -54,9 +54,14 @@ class ServerContractTests(unittest.TestCase):
             {(item["name"], item["method"], item["path"]) for item in manifest["requests"]},
         )
         header = (ROOT / "components" / "pm_network" / "include" / "pm_network.h").read_text(encoding="utf-8")
-        source = (ROOT / "components" / "pm_network" / "pm_network.c").read_text(encoding="utf-8")
-        for item in manifest["requests"]:
-            self.assertIn(item["path"], header)
+        source = (ROOT / "components" / "pm_network" / "pm_network_v2.c").read_text(encoding="utf-8")
+        self.assertIn('/api/v1/devices/enroll', header)
+        self.assertIn('/api/v1/device/telemetry/v2', header)
+        for retired in (
+            '/api/v1/device/heartbeat', '/api/v1/device/readings',
+            '/api/v1/device/permanent-loss',
+        ):
+            self.assertNotIn(retired, header + source)
         self.assertNotIn("/api/device/v1/", header + source)
 
     def test_ota_command_and_authenticated_download_contract(self) -> None:
@@ -187,12 +192,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc16_metadata_binds_server_rc16_without_runtime_contract_change(self) -> None:
-        expected_version = "0.1.0-rc.16"
-        expected_build_number = 19
-        expected_tag = "v0.1.0-rc.16"
+    def test_rc17_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.17"
+        expected_build_number = 20
+        expected_tag = "v0.1.0-rc.17"
         expected_openapi_sha256 = (
-            "8c6d3d73f7bfaa4bd34b4451c860b4199426e556cba1f6f9a48374ea22049c24"
+            "c2aaa98fc0d31402eac7bd38495838ce830cd21242bc1b32a2929ed7da712e41"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -219,7 +224,9 @@ class ServerContractTests(unittest.TestCase):
         self.assertIn(f"[string]$Version = '{expected_version}'", powershell_builder)
         self.assertIn(f"[int]$BuildNumber = {expected_build_number}", powershell_builder)
         self.assertIn(f"# PowerMeter Sensor Headless {expected_version}", release_notes)
-        self.assertIn("Public RC15 remains immutable and installable.", release_notes)
+        self.assertIn("Public RC15 and RC16 remain immutable and installable.", release_notes)
+        self.assertIn("pm-telemetry/2.0.0", release_notes)
+        self.assertIn("does not complete the server-side OTA deployment", release_notes)
 
     def test_credential_rotation_payloads_results_and_key_cutover_are_exact(self) -> None:
         vectors = self.validate(

@@ -220,10 +220,6 @@ static void test_state_machine(void)
     CHECK(pm_state_transition(&state, PM_EVENT_CONFIG_VALID, 3));
     CHECK(pm_state_transition(&state, PM_EVENT_WIFI_CONNECTED, 4));
     CHECK(state.state == PM_STATE_RUNNING);
-    CHECK(pm_state_transition(&state, PM_EVENT_STORAGE_FAILED, 5));
-    CHECK(state.state == PM_STATE_DEGRADED_STORAGE);
-    CHECK(pm_state_transition(&state, PM_EVENT_STORAGE_RECOVERED, 6));
-    CHECK(state.state == PM_STATE_RUNNING);
     CHECK(pm_state_transition(&state, PM_EVENT_OTA_AVAILABLE, 7));
     CHECK(pm_state_transition(&state, PM_EVENT_OTA_STARTED, 8));
     CHECK(pm_state_transition(&state, PM_EVENT_OTA_FINISHED, 9));

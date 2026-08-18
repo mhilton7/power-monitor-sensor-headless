@@ -1,6 +1,6 @@
 idf_component_register(
-    SRCS "pm_network.c" "pm_command_envelope.c" "pm_backlog_policy.c"
+    SRCS "pm_network_v2.c" "pm_command_envelope.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_wifi esp_event esp_netif esp_http_client esp_hw_support esp_app_format heap lwip espressif__cjson mbedtls pm_config pm_meter pm_storage pm_protocol pm_commands pm_provisioning pm_diagnostics
+    REQUIRES esp_wifi esp_event esp_netif esp_http_client esp_hw_support esp_app_format heap lwip espressif__cjson mbedtls pm_config pm_meter pm_telemetry pm_protocol pm_commands pm_provisioning pm_diagnostics
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wframe-larger-than=3072)

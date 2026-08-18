@@ -1,12 +1,12 @@
 # PowerMeter V2 headless sensor
 
-Greenfield ESP-IDF firmware for an ESP32-S3 N16R8-class measurement agent. It samples one PZEM-004T channel, creates one-minute durable intervals, journals them to microSD, and communicates only through outbound authenticated HTTPS. It has no runtime web server, local UI, MQTT, relay, load control, remote shell, scripting engine, or third-party telemetry.
+Greenfield ESP-IDF firmware for an ESP32-S3 N16R8-class measurement agent. It samples one PZEM-004T channel and sends independent latest-value telemetry through outbound authenticated HTTPS. The central server is the sole durable History owner; firmware has no persistent measurement queue and never mounts, reads, writes, or formats microSD. It has no runtime web server, local UI, MQTT, relay, load control, remote shell, scripting engine, or third-party telemetry.
 
-The sole authority for voltage, current, power, frequency, power factor, cumulative energy, interval energy, completeness, and upload history is an authenticated PZEM frame accepted by the selected meter driver. Missing evidence remains missing; a measured zero remains zero. Power integration is diagnostic only and is never substituted for a missing or suspect PZEM cumulative-energy delta. A one-CT unit is `energy_only` and must not be inferred to represent whole-home usage or solar export.
+The sole sensor authority for voltage, current, power, frequency, power factor, and cumulative energy is an authenticated PZEM frame accepted by the selected meter driver. Missing evidence remains missing; a measured zero remains zero. Server-side History may safely use monotonic PZEM cumulative-energy deltas across connection gaps, but never invents a missing power curve. A one-CT unit is `energy_only` and must not be inferred to represent whole-home usage or solar export.
 
 ## Release status
 
-`0.1.0-rc.16` is the coordinated metadata binding for the additive PowerMeter V2 server RC16 release. It carries the public RC15 backlog runtime unchanged, binds the generated server RC16 OpenAPI contract, and preserves `pm-protocol/1.0.0`; public RC15 remains immutable. RC15 deterministically reduces oversized reading batches to the largest complete JSON body that fits the authenticated 8,192-byte transport limit and reports a completely inventoried missing prefix without discarding retained records. `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED` remains disabled, release artifacts remain `hardware_certification: pending`, and stable promotion still requires exact marked-unit evidence, electrical validation, and the 72-hour suite; see [hardware identity](docs/HARDWARE_IDENTITY.md) and [hardware certification](docs/HARDWARE_CERTIFICATION.md).
+`0.1.0-rc.17` is the coordinated stateless-telemetry release for PowerMeter V2 server `v0.1.0-rc.17`. It adds `pm-telemetry/2.0.0`, preserves `pm-protocol/1.0.0` for control/authentication/OTA, and binds the final generated server OpenAPI SHA-256 `c2aaa98fc0d31402eac7bd38495838ce830cd21242bc1b32a2929ed7da712e41`. The active build excludes SD, backlog, missing-prefix, and contiguous-acknowledgement components. `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED` remains disabled, release artifacts remain `hardware_certification: pending`, and stable promotion still requires exact marked-unit evidence, electrical validation, and the 72-hour suite; see [hardware identity](docs/HARDWARE_IDENTITY.md) and [hardware certification](docs/HARDWARE_CERTIFICATION.md).
 
 ## Build and test
 
@@ -20,4 +20,4 @@ idf.py -B build-rc -D 'SDKCONFIG=build-rc/sdkconfig' `
 
 Do not energize mains wiring until the marked hardware, isolation, level translation, enclosure, fusing, conductor ratings, and installation have been reviewed by a qualified person. Never connect an unverified 5 V PZEM TX directly to ESP32 GPIO. Detailed wiring and flash/provision commands are in [BUILD_AND_FLASH.md](docs/BUILD_AND_FLASH.md), [WIRING.md](docs/WIRING.md), and [POWERSHELL_PROVISIONING.md](docs/POWERSHELL_PROVISIONING.md).
 
-Protocol: `pm-protocol/1.0.0`. USB recovery protocol: `pm-com/1.0.0`. License: MIT.
+Telemetry: `pm-telemetry/2.0.0`. Control/authentication/OTA: `pm-protocol/1.0.0`. USB recovery: `pm-com/1.0.0`. License: MIT.

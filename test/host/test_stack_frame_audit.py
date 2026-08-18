@@ -10,7 +10,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from audit_stack_frames import parse_disassembly, resolve_objdump  # noqa: E402
+from audit_stack_frames import first_party_objects, parse_disassembly, resolve_objdump  # noqa: E402
 
 
 class StackFrameAuditTests(unittest.TestCase):
@@ -57,6 +57,32 @@ class StackFrameAuditTests(unittest.TestCase):
 
     def test_explicit_objdump_path_takes_precedence(self) -> None:
         self.assertEqual(resolve_objdump(Path("unused"), "custom-objdump"), "custom-objdump")
+
+    def test_object_inventory_uses_only_active_first_party_components(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            build = root / "build"
+            (root / "main").mkdir()
+            (root / "components" / "active").mkdir(parents=True)
+            (root / "components" / "retired").mkdir()
+            for name in ("main", "active"):
+                object_dir = build / "esp-idf" / name
+                object_dir.mkdir(parents=True)
+                (object_dir / f"{name}.c.obj").touch()
+            (build / "project_description.json").write_text(
+                json.dumps(
+                    {
+                        "build_components": ["main", "active"],
+                        "build_component_paths": [
+                            str(root / "main"),
+                            str(root / "components" / "active"),
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            objects = first_party_objects(root, build)
+            self.assertEqual(["active", "main"], [component for component, _ in objects])
 
 
 if __name__ == "__main__":

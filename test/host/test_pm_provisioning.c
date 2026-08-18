@@ -28,7 +28,6 @@ static unsigned int s_uninstall_calls;
 static BaseType_t s_task_create_result = pdPASS;
 static pm_provisioning_test_stage_t s_failed_stage = (pm_provisioning_test_stage_t)-1;
 static esp_err_t s_safe_reboot_result;
-static unsigned int s_flush_calls;
 int s_test_heap_fail;
 
 static const esp_app_desc_t s_app_desc = {.version = "test-version"};
@@ -215,14 +214,6 @@ static esp_err_t safe_reboot_prepare(void *context)
     return s_safe_reboot_result;
 }
 
-static esp_err_t flush_for_reboot(void *context, uint32_t timeout_ms)
-{
-    (void)context;
-    CHECK(timeout_ms == 3000U);
-    s_flush_calls++;
-    return s_safe_reboot_result;
-}
-
 static pm_config_t active_config(uint32_t generation)
 {
     pm_config_t config = {0};
@@ -262,7 +253,6 @@ static void reset_fakes(void)
     s_task_create_result = pdPASS;
     s_failed_stage = (pm_provisioning_test_stage_t)-1;
     s_safe_reboot_result = ESP_OK;
-    s_flush_calls = 0U;
     s_test_heap_fail = 0;
 }
 
@@ -329,12 +319,12 @@ static int test_safe_reboot_arms_only_after_successful_prepare_and_render(void)
     s_safe_reboot_result = ESP_FAIL;
     CHECK(pm_provisioning_handle_line(&session, line, response, sizeof(response)) == ESP_FAIL);
     CHECK(!session.reboot_requested);
-    CHECK(strstr(response, "storage_flush_failed_no_reboot") != NULL);
+    CHECK(strstr(response, "safe_reboot_preparation_failed") != NULL);
 
     s_safe_reboot_result = ESP_OK;
     CHECK(pm_provisioning_handle_line(&session, line, response, sizeof(response)) == ESP_OK);
     CHECK(session.reboot_requested);
-    CHECK(strstr(response, "storage_flushed_awaiting_reboot") != NULL);
+    CHECK(strstr(response, "ready_for_safe_reboot") != NULL);
 
     session.reboot_requested = false;
     char tiny[8] = {0};
@@ -365,15 +355,10 @@ static int test_oversized_frame_discards_suffix_until_newline(void)
     return 0;
 }
 
-static int test_reboot_barrier_allows_missing_storage_only_without_flush(void)
+static int test_reboot_barrier_has_no_persistent_writer_to_drain(void)
 {
     reset_fakes();
-    s_safe_reboot_result = ESP_FAIL;
-    CHECK(pm_provisioning_prepare_reboot_barrier(false, flush_for_reboot, NULL, 3000U) == ESP_OK);
-    CHECK(s_flush_calls == 0U);
-    CHECK(pm_provisioning_prepare_reboot_barrier(true, flush_for_reboot, NULL, 3000U) == ESP_FAIL);
-    CHECK(s_flush_calls == 1U);
-    CHECK(pm_provisioning_prepare_reboot_barrier(true, NULL, NULL, 3000U) == ESP_ERR_INVALID_ARG);
+    CHECK(pm_provisioning_prepare_reboot_barrier() == ESP_OK);
     return 0;
 }
 
@@ -407,7 +392,7 @@ int main(void)
     CHECK(test_failed_retest_clears_stale_success_and_partial_secret() == 0);
     CHECK(test_safe_reboot_arms_only_after_successful_prepare_and_render() == 0);
     CHECK(test_oversized_frame_discards_suffix_until_newline() == 0);
-    CHECK(test_reboot_barrier_allows_missing_storage_only_without_flush() == 0);
+    CHECK(test_reboot_barrier_has_no_persistent_writer_to_drain() == 0);
     CHECK(test_reboot_requires_complete_write_and_tx_drain() == 0);
     CHECK(test_usb_start_allocation_and_task_failure_cleanup() == 0);
     puts("pm_provisioning state-machine tests passed");

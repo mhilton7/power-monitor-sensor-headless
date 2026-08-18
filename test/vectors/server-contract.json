@@ -80,6 +80,6 @@
     "device-reading-batch.schema.json": "80067a6ecd6ff6a89d3357500ae32fa2e700965a73e9132d1f1d3dd7b88b45c8",
     "device-permanent-loss.schema.json": "80cbbc6912dfb096e9d30900da7583a572d519073b6055362143650e88da0fc0",
     "server-device-response.schema.json": "750e18ce6776cf3b0ffb3546c5b222f853e57a77329d0439b7c931254cda2ddc",
-    "power-meter-v2.openapi.json": "8c6d3d73f7bfaa4bd34b4451c860b4199426e556cba1f6f9a48374ea22049c24"
+    "power-meter-v2.openapi.json": "c2aaa98fc0d31402eac7bd38495838ce830cd21242bc1b32a2929ed7da712e41"
   }
 }

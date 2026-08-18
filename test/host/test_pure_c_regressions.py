@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def host_compiler() -> str | None:
     configured = os.environ.get("CC")
-    candidates = ([configured] if configured else []) + ["cc", "gcc", "clang"]
+    candidates = ([configured] if configured else []) + ["cc", "gcc", "clang", "cl"]
     for candidate in candidates:
         if candidate and shutil.which(candidate):
             return candidate
@@ -29,17 +29,31 @@ class PureCRegressionTests(unittest.TestCase):
             self.skipTest("no native host C compiler is available")
         with tempfile.TemporaryDirectory(prefix="pm-host-c-") as temporary:
             executable = Path(temporary) / (name + (".exe" if os.name == "nt" else ""))
-            command = [
-                compiler,
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                *[f"-I{ROOT / directory}" for directory in include_directories],
-                *[str(ROOT / source) for source in sources],
-                "-o",
-                str(executable),
-            ]
+            if Path(compiler).name.lower() in {"cl", "cl.exe"}:
+                object_directory = str(Path(temporary)) + os.sep
+                command = [
+                    compiler,
+                    "/nologo",
+                    "/std:c11",
+                    "/W4",
+                    "/WX",
+                    *[f"/I{ROOT / directory}" for directory in include_directories],
+                    *[str(ROOT / source) for source in sources],
+                    f"/Fo{object_directory}",
+                    f"/Fe:{executable}",
+                ]
+            else:
+                command = [
+                    compiler,
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    *[f"-I{ROOT / directory}" for directory in include_directories],
+                    *[str(ROOT / source) for source in sources],
+                    "-o",
+                    str(executable),
+                ]
             compiled = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
             self.assertEqual(0, compiled.returncode, compiled.stdout + compiled.stderr)
             executed = subprocess.run(
@@ -73,14 +87,19 @@ class PureCRegressionTests(unittest.TestCase):
             ],
         )
 
-    def test_adaptive_backlog_and_missing_prefix_policy(self) -> None:
+    def test_stateless_latest_value_and_backoff_policy(self) -> None:
         self.compile_and_run(
-            "test_pm_backlog_policy",
+            "test_pm_telemetry",
             sources=[
-                "test/host/test_pm_backlog_policy.c",
-                "components/pm_network/pm_backlog_policy.c",
+                "test/host/test_pm_telemetry.c",
+                "components/pm_telemetry/pm_telemetry.c",
             ],
-            include_directories=["components/pm_network/include"],
+            include_directories=[
+                "test/host/stubs",
+                "components/pm_config/include",
+                "components/pm_meter/include",
+                "components/pm_telemetry/include",
+            ],
         )
 
 
