@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import importlib.util
 import json
 from pathlib import Path
 import struct
@@ -192,12 +193,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc17_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
-        expected_version = "0.1.0-rc.17"
-        expected_build_number = 20
-        expected_tag = "v0.1.0-rc.17"
+    def test_rc18_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.18"
+        expected_build_number = 21
+        expected_tag = "v0.1.0-rc.18"
         expected_openapi_sha256 = (
-            "c2aaa98fc0d31402eac7bd38495838ce830cd21242bc1b32a2929ed7da712e41"
+            "c0711c053343a5a95120a6f793cd7cb9f6f3c6e59adc403553fe53767eeb7a61"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -225,8 +226,24 @@ class ServerContractTests(unittest.TestCase):
         self.assertIn(f"[int]$BuildNumber = {expected_build_number}", powershell_builder)
         self.assertIn(f"# PowerMeter Sensor Headless {expected_version}", release_notes)
         self.assertIn("Public RC15 and RC16 remain immutable and installable.", release_notes)
+        self.assertIn("RC17 remains immutable failed-candidate evidence", release_notes)
         self.assertIn("pm-telemetry/2.0.0", release_notes)
         self.assertIn("does not complete the server-side OTA deployment", release_notes)
+
+    def test_release_compatibility_declares_stateless_telemetry_protocol(self) -> None:
+        path = ROOT / "tools" / "build_release.py"
+        spec = importlib.util.spec_from_file_location("pm_build_release", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        record = module.compatibility_record(
+            "0.1.0-rc.18", "v0.1.0-rc.18", "a" * 40, "b" * 64
+        )
+        self.assertEqual("pm-protocol/1.0.0", record["contracts"]["device_protocol"])
+        self.assertEqual(
+            "pm-telemetry/2.0.0", record["contracts"]["telemetry_protocol"]
+        )
 
     def test_credential_rotation_payloads_results_and_key_cutover_are_exact(self) -> None:
         vectors = self.validate(

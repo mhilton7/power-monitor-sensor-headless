@@ -18,6 +18,7 @@ import jsonschema
 PROJECT = "power-monitor-sensor-headless"
 BOARD = "esp32-s3-devkitc-n16r8-reference/1"
 PROTOCOL = "pm-protocol/1.0.0"
+TELEMETRY_PROTOCOL = "pm-telemetry/2.0.0"
 
 
 def sha256(path: Path) -> str:
@@ -34,6 +35,30 @@ def run(*args: str, cwd: Path | None = None) -> str:
 
 def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + '\n', encoding='utf-8', newline='\n')
+
+
+def compatibility_record(version: str, server_tag: str, commit: str,
+                         image_sha256: str) -> dict[str, object]:
+    return {
+        'schema': 'pm-release-compatibility/1.0.0',
+        'firmware': {
+            'repository': 'https://github.com/mhilton7/power-monitor-sensor-headless',
+            'tag': f'v{version}', 'commit': commit, 'version': version,
+            'image_sha256': image_sha256, 'project_name': PROJECT,
+            'target': 'esp32s3', 'board_profile': BOARD,
+        },
+        'server': {
+            'repository': 'https://github.com/mhilton7/power-monitor-v2',
+            'tag': server_tag, 'minimum_version': server_tag[1:],
+        },
+        'contracts': {
+            'device_protocol': PROTOCOL,
+            'telemetry_protocol': TELEMETRY_PROTOCOL,
+            'com_protocol': 'pm-com/1.0.0',
+            'config_schema': 1,
+            'journal_format': 1,
+        },
+    }
 
 
 def copy_required(source: Path, destination: Path) -> None:
@@ -121,7 +146,7 @@ def main() -> int:
     parser.add_argument('--download-base', required=True)
     parser.add_argument('--hardware-status', type=Path, required=True)
     parser.add_argument('--configuration', choices=('release-candidate', 'release'), default='release-candidate')
-    parser.add_argument('--server-tag', default='v0.1.0-rc.17')
+    parser.add_argument('--server-tag', default='v0.1.0-rc.18')
     parser.add_argument('--dependency-audit-report', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -193,14 +218,10 @@ def main() -> int:
     manifest_schema = json.loads((root / 'release' / 'manifest.schema.json').read_text(encoding='utf-8'))
     jsonschema.Draft202012Validator(manifest_schema, format_checker=jsonschema.FormatChecker()).validate(manifest)
     write_json(output / 'manifest.json', manifest)
-    write_json(output / 'compatibility.json', {
-        'schema':'pm-release-compatibility/1.0.0',
-        'firmware':{'repository':'https://github.com/mhilton7/power-monitor-sensor-headless',
-                    'tag':f'v{args.version}','commit':commit,'version':args.version,
-                    'image_sha256':sha256(firmware),'project_name':PROJECT,'target':'esp32s3','board_profile':BOARD},
-        'server':{'repository':'https://github.com/mhilton7/power-monitor-v2','tag':args.server_tag,'minimum_version':args.server_tag[1:]},
-        'contracts':{'device_protocol':PROTOCOL,'com_protocol':'pm-com/1.0.0','config_schema':1,'journal_format':1}
-    })
+    write_json(
+        output / 'compatibility.json',
+        compatibility_record(args.version, args.server_tag, commit, sha256(firmware)),
+    )
 
     idf_path = os.environ.get('IDF_PATH', r'C:\esp\v6.0.2\esp-idf')
     idf_version = run('git', '-C', idf_path, 'describe', '--tags', '--exact-match')
