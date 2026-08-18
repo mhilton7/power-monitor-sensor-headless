@@ -187,12 +187,15 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc15_firmware_remains_compatible_with_server_rc14(self) -> None:
-        expected_tag = "v0.1.0-rc.14"
+    def test_rc16_metadata_binds_server_rc16_without_runtime_contract_change(self) -> None:
+        expected_version = "0.1.0-rc.16"
+        expected_build_number = 19
+        expected_tag = "v0.1.0-rc.16"
         expected_openapi_sha256 = (
-            "26dbc5cf443cb63a29ca1f22bc069b566afa4eb026ed5c86023a81ffd299d1fe"
+            "8c6d3d73f7bfaa4bd34b4451c860b4199426e556cba1f6f9a48374ea22049c24"
         )
         manifest = self.load(VECTORS, "server-contract.json")
+        self.assertEqual(PROTOCOL, manifest["protocol_id"])
         self.assertEqual(
             expected_openapi_sha256,
             manifest["shared_contract_sha256"]["power-meter-v2.openapi.json"],
@@ -203,8 +206,20 @@ class ServerContractTests(unittest.TestCase):
         release_builder = (ROOT / "tools" / "build_release.py").read_text(
             encoding="utf-8"
         )
+        powershell_builder = (ROOT / "tools" / "Build-Release.ps1").read_text(
+            encoding="utf-8"
+        )
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        release_notes = (ROOT / "release" / "RELEASE_NOTES.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn(f'--server-tag "{expected_tag}"', workflow)
         self.assertIn(f"default='{expected_tag}'", release_builder)
+        self.assertIn(f'set(PM_FIRMWARE_VERSION "{expected_version}"', cmake)
+        self.assertIn(f"[string]$Version = '{expected_version}'", powershell_builder)
+        self.assertIn(f"[int]$BuildNumber = {expected_build_number}", powershell_builder)
+        self.assertIn(f"# PowerMeter Sensor Headless {expected_version}", release_notes)
+        self.assertIn("Public RC15 remains immutable and installable.", release_notes)
 
     def test_credential_rotation_payloads_results_and_key_cutover_are_exact(self) -> None:
         vectors = self.validate(
