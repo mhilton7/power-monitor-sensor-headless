@@ -1,8 +1,8 @@
-# PowerMeter Sensor Headless 0.1.0-rc.18
+# PowerMeter Sensor Headless 0.1.0-rc.19
 
-RC18 is the coordinated stateless-telemetry firmware for PowerMeter V2 server `v0.1.0-rc.18` (firmware build 21). It adds the independent sensor transport `pm-telemetry/2.0.0` while preserving the shared authenticated control, enrollment, provisioning, and OTA protocol `pm-protocol/1.0.0`. The final generated server OpenAPI document is bound by SHA-256 `c0711c053343a5a95120a6f793cd7cb9f6f3c6e59adc403553fe53767eeb7a61`.
+RC19 is a metadata-only coordination release for PowerMeter V2 server `v0.1.0-rc.19` (firmware build 22). Its production runtime and configuration profiles are byte-identical to public RC18. It retains the independent sensor transport `pm-telemetry/2.0.0` and authenticated control, enrollment, provisioning, and OTA protocol `pm-protocol/1.0.0`. The generated server OpenAPI document is bound by SHA-256 `1f0fe0aed5fe187a6c22523469dc9d2e76de9f5c75bed4433a654e339968deda`.
 
-RC17 remains immutable failed-candidate evidence: its public compatibility record omitted `contracts.telemetry_protocol`, so the coordinated server gate correctly refused it. RC18 adds that required `pm-telemetry/2.0.0` compatibility field and a direct release-builder regression without changing the validated stateless runtime.
+RC17 remains immutable failed-candidate evidence. RC18 remains immutable public stateless-runtime evidence. RC19 changes only release identity and compatibility metadata so the server can publish its null-storage frontend repair without weakening the same-tag firmware gate.
 
 Production firmware no longer links or starts the microSD storage, interval, backlog, adaptive-batch, contiguous-acknowledgement, or missing-prefix components. It never mounts, reads, writes, repairs, verifies, erases, or formats an inserted card. Existing accepted server History is not changed, and legacy firmware source remains only as unbuilt audit history. Public RC15 and RC16 remain immutable and installable.
 
@@ -16,4 +16,4 @@ Sensor identity, Wi-Fi/static-IP/DNS settings, server origin, CA, enrolled direc
 
 The ESP-IDF post-boot rollback check proves only that configuration, required tasks, watchdogs, stateless telemetry runtime, and bounded network retry capability were created. That local validation does not complete the server-side OTA deployment. The server must keep the deployment pending until the same authenticated sensor later reports the expected semantic version and complete 64-character lowercase ELF build identifier.
 
-RC18 remains a release candidate: `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED=n`, hardware certification is pending, and no physical sensor migration or OTA success is claimed by this release build. Stable promotion still requires exact marked-unit electrical, rollback, recovery, and soak evidence.
+RC19 remains a release candidate: `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED=n`, hardware certification is pending, and no physical sensor migration or OTA success is claimed by this release build. Stable promotion still requires exact marked-unit electrical, rollback, recovery, and soak evidence.

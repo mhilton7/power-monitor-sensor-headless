@@ -193,12 +193,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc18_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
-        expected_version = "0.1.0-rc.18"
-        expected_build_number = 21
-        expected_tag = "v0.1.0-rc.18"
+    def test_rc19_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.19"
+        expected_build_number = 22
+        expected_tag = "v0.1.0-rc.19"
         expected_openapi_sha256 = (
-            "c0711c053343a5a95120a6f793cd7cb9f6f3c6e59adc403553fe53767eeb7a61"
+            "1f0fe0aed5fe187a6c22523469dc9d2e76de9f5c75bed4433a654e339968deda"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -227,6 +227,7 @@ class ServerContractTests(unittest.TestCase):
         self.assertIn(f"# PowerMeter Sensor Headless {expected_version}", release_notes)
         self.assertIn("Public RC15 and RC16 remain immutable and installable.", release_notes)
         self.assertIn("RC17 remains immutable failed-candidate evidence", release_notes)
+        self.assertIn("RC18 remains immutable", release_notes)
         self.assertIn("pm-telemetry/2.0.0", release_notes)
         self.assertIn("does not complete the server-side OTA deployment", release_notes)
 
@@ -238,7 +239,7 @@ class ServerContractTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         record = module.compatibility_record(
-            "0.1.0-rc.18", "v0.1.0-rc.18", "a" * 40, "b" * 64
+            "0.1.0-rc.19", "v0.1.0-rc.19", "a" * 40, "b" * 64
         )
         self.assertEqual("pm-protocol/1.0.0", record["contracts"]["device_protocol"])
         self.assertEqual(
