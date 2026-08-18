@@ -557,7 +557,7 @@ cleanup:
 }
 
 esp_err_t pm_ota_post_boot_validate(bool config_readable, bool scheduler_running, bool watchdog_running,
-                                    bool storage_initialized_or_degraded, bool network_retry_capable)
+                                    bool telemetry_runtime_ready, bool network_retry_capable)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
@@ -565,7 +565,7 @@ esp_err_t pm_ota_post_boot_validate(bool config_readable, bool scheduler_running
     if (error == ESP_ERR_NOT_FOUND || state != ESP_OTA_IMG_PENDING_VERIFY) {
         return ESP_OK;
     }
-    if (config_readable && scheduler_running && watchdog_running && storage_initialized_or_degraded &&
+    if (config_readable && scheduler_running && watchdog_running && telemetry_runtime_ready &&
         network_retry_capable) {
         pm_ota_checkpoint_t checkpoint = {0};
         error = pm_ota_load_checkpoint(&checkpoint);

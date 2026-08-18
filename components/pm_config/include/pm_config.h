@@ -51,6 +51,9 @@ typedef struct {
     pm_meter_variant_t meter_variant;
     uint8_t device_secret[PM_CONFIG_SECRET_MAX];
     uint8_t device_secret_len;
+    /* Legacy schema-v1 ABI words. Retained only so existing configuration
+     * blobs keep their size/CRC; the stateless runtime never updates or uses
+     * them for telemetry acceptance. */
     uint64_t sequence_floor;
     uint64_t acknowledged_sequence;
     uint32_t reset_generation;

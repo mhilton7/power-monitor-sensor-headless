@@ -17,9 +17,8 @@ SPEC.loader.exec_module(PROFILE)
 def base_values() -> dict[str, str]:
     return {
         "CONFIG_PM_METER_VARIANT_PZEM004T_V4_CLASSIC": "1",
-        "CONFIG_PM_HEARTBEAT_SECONDS": "15",
         "CONFIG_PM_METER_SAMPLE_MS": "1000",
-        "CONFIG_PM_DURABLE_INTERVAL_SECONDS": "60",
+        "CONFIG_PM_TELEMETRY_INTERVAL_SECONDS": "5",
     }
 
 
@@ -74,10 +73,10 @@ class FirmwareProfileTests(unittest.TestCase):
         self.assertIn("CONFIG_PM_HARDWARE_IDENTITY_VERIFIED=y", release)
 
     def test_meter_self_test_uses_the_existing_sample_and_cannot_add_uart_load(self):
-        source = (ROOT / "main" / "app_main.c").read_text(encoding="utf-8")
+        source = (ROOT / "main" / "app_main_stateless.c").read_text(encoding="utf-8")
         self.assertEqual(1, source.count("pm_meter_read(&s_meter"))
         self_test = source.split("case PM_COMMAND_METER_SELF_TEST:", 1)[1].split(
-            "case PM_COMMAND_STORAGE_SELF_TEST:", 1
+            "case PM_COMMAND_OTA_INSTALL:", 1
         )[0]
         self.assertIn("pm_network_copy_live(&sample, &present)", self_test)
         self.assertNotIn("pm_meter_read", self_test)

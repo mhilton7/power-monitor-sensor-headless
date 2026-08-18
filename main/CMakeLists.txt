@@ -1,11 +1,10 @@
 idf_component_register(
-    SRCS "app_main.c" "runtime_startup.c"
+    SRCS "app_main_stateless.c" "runtime_startup.c"
     INCLUDE_DIRS "."
     REQUIRES
         pm_config
-        pm_measurement
         pm_meter
-        pm_storage
+        pm_telemetry
         pm_protocol
         pm_network
         pm_commands
@@ -20,6 +19,7 @@ idf_component_register(
         esp_timer
         esp_system
         esp_hw_support
+        espcoredump
         heap
         esp_driver_gpio
 )

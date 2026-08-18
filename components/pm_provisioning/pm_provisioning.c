@@ -346,10 +346,10 @@ esp_err_t pm_provisioning_handle_line(pm_provisioning_session_t *session, const 
             result = session->safe_reboot_prepare(session->callback_context);
             if (result == ESP_OK) {
                 request_reboot = true;
-                cJSON_AddStringToObject(out, "stage", "storage_flushed_awaiting_reboot");
+                cJSON_AddStringToObject(out, "stage", "ready_for_safe_reboot");
             } else {
                 cJSON_ReplaceItemInObject(out, "ok", cJSON_CreateFalse());
-                cJSON_AddStringToObject(out, "error", "storage_flush_failed_no_reboot");
+                cJSON_AddStringToObject(out, "error", "safe_reboot_preparation_failed");
                 cJSON_AddNumberToObject(out, "code", result);
             }
         }
@@ -396,16 +396,10 @@ pm_com_frame_result_t pm_provisioning_framer_push(pm_com_framer_t *framer, uint8
     return PM_COM_FRAME_OVERSIZED;
 }
 
-esp_err_t pm_provisioning_prepare_reboot_barrier(bool storage_worker_available,
-                                                  pm_safe_reboot_flush_fn flush, void *context,
-                                                  uint32_t timeout_ms)
+esp_err_t pm_provisioning_prepare_reboot_barrier(void)
 {
-    if (!storage_worker_available) {
-        /* Isolated provisioning starts no journal producers, so there is no
-         * volatile storage work to drain when the worker never started. */
-        return ESP_OK;
-    }
-    return flush != NULL && timeout_ms > 0U ? flush(context, timeout_ms) : ESP_ERR_INVALID_ARG;
+    /* Stateless telemetry has no persistent writer or queue to drain. */
+    return ESP_OK;
 }
 
 bool pm_provisioning_reboot_tx_complete(bool reboot_requested, size_t response_length,

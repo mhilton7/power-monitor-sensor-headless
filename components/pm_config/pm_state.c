@@ -59,20 +59,15 @@ bool pm_state_transition(pm_state_machine_t *machine, pm_state_event_t event, in
         return transition_to(machine, PM_STATE_DEGRADED_SERVER, now_us);
     case PM_EVENT_SERVER_RECOVERED:
     case PM_EVENT_METER_RECOVERED:
-    case PM_EVENT_STORAGE_RECOVERED:
         return transition_to(machine, PM_STATE_RUNNING, now_us);
     case PM_EVENT_METER_FAILED:
         return transition_to(machine, PM_STATE_DEGRADED_METER, now_us);
-    case PM_EVENT_STORAGE_FAILED:
-        return transition_to(machine, PM_STATE_DEGRADED_STORAGE, now_us);
     case PM_EVENT_OTA_AVAILABLE:
         return transition_to(machine, PM_STATE_OTA_PENDING, now_us);
     case PM_EVENT_OTA_STARTED:
         return machine->state == PM_STATE_OTA_PENDING && transition_to(machine, PM_STATE_OTA_INSTALLING, now_us);
     case PM_EVENT_OTA_FINISHED:
         return machine->state == PM_STATE_OTA_INSTALLING && transition_to(machine, PM_STATE_SAFE_REBOOT, now_us);
-    case PM_EVENT_MAINTENANCE_SLEEP:
-        return transition_to(machine, PM_STATE_MAINTENANCE_SLEEP, now_us);
     case PM_EVENT_PHYSICAL_RECOVERY:
         return transition_to(machine, PM_STATE_RECOVERY_COM, now_us);
     case PM_EVENT_SAFE_REBOOT:
@@ -98,8 +93,8 @@ const char *pm_state_name(pm_operating_state_t state)
 {
     static const char *const names[PM_STATE_COUNT] = {
         "BOOT", "SELF_TEST", "UNPROVISIONED_COM", "CONNECTING_WIFI", "ENROLLING", "RUNNING",
-        "DEGRADED_NETWORK", "DEGRADED_SERVER", "DEGRADED_METER", "DEGRADED_STORAGE", "OTA_PENDING",
-        "OTA_INSTALLING", "MAINTENANCE_SLEEP", "RECOVERY_COM", "SAFE_REBOOT",
+        "DEGRADED_NETWORK", "DEGRADED_SERVER", "DEGRADED_METER", "OTA_PENDING",
+        "OTA_INSTALLING", "RECOVERY_COM", "SAFE_REBOOT",
     };
     return state < PM_STATE_COUNT ? names[state] : "INVALID";
 }

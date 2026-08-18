@@ -82,11 +82,34 @@ def parse_disassembly(text: str) -> list[dict[str, object]]:
     return functions
 
 
+def active_first_party_components(project_root: Path, build_dir: Path) -> list[str]:
+    description_path = build_dir / "project_description.json"
+    if not description_path.is_file():
+        raise RuntimeError(f"missing build component inventory: {description_path}")
+    try:
+        description = json.loads(description_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid build component inventory {description_path}: {exc}") from exc
+    names = description.get("build_components")
+    paths = description.get("build_component_paths")
+    if not isinstance(names, list) or not isinstance(paths, list) or len(names) != len(paths):
+        raise RuntimeError(f"invalid build component inventory shape: {description_path}")
+    project_root = project_root.resolve()
+    component_root = (project_root / "components").resolve()
+    first_party: list[str] = []
+    for name, source in zip(names, paths, strict=True):
+        if not isinstance(name, str) or not name or not isinstance(source, str) or not source:
+            continue
+        source_path = Path(source).resolve()
+        if source_path == (project_root / "main").resolve() or source_path.parent == component_root:
+            first_party.append(name)
+    if "main" not in first_party:
+        raise RuntimeError("active first-party component inventory does not contain main")
+    return sorted(set(first_party))
+
+
 def first_party_objects(project_root: Path, build_dir: Path) -> list[tuple[str, Path]]:
-    components = ["main"]
-    components.extend(
-        sorted(path.name for path in (project_root / "components").iterdir() if path.is_dir())
-    )
+    components = active_first_party_components(project_root, build_dir)
     objects: list[tuple[str, Path]] = []
     missing: list[str] = []
     for component in components:

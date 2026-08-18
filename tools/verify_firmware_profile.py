@@ -40,9 +40,8 @@ def validate_profile(values: dict[str, str], profile: str) -> tuple[list[str], s
         },
     }
     expected_timing = {
-        "CONFIG_PM_HEARTBEAT_SECONDS": "15",
         "CONFIG_PM_METER_SAMPLE_MS": "1000",
-        "CONFIG_PM_DURABLE_INTERVAL_SECONDS": "60",
+        "CONFIG_PM_TELEMETRY_INTERVAL_SECONDS": "5",
     }
     errors: list[str] = []
     expected = expected_common | expected_by_profile[profile]
@@ -69,9 +68,8 @@ def main() -> int:
         "profile": arguments.profile,
         "pzem_mode": mode,
         "timing": {
-            "heartbeat_seconds": values.get("CONFIG_PM_HEARTBEAT_SECONDS"),
             "sample_ms": values.get("CONFIG_PM_METER_SAMPLE_MS"),
-            "durable_interval_seconds": values.get("CONFIG_PM_DURABLE_INTERVAL_SECONDS"),
+            "telemetry_interval_seconds": values.get("CONFIG_PM_TELEMETRY_INTERVAL_SECONDS"),
         },
         "errors": errors,
     }

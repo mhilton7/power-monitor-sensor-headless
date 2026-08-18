@@ -1,0 +1,190 @@
+{
+  "$defs": {
+    "CommandEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "command_type": {
+          "title": "Command Type",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "not_before": {
+          "format": "date-time",
+          "title": "Not Before",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Payload",
+          "type": "object"
+        },
+        "required_firmware_capability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Required Firmware Capability"
+        }
+      },
+      "required": [
+        "command_id",
+        "command_type",
+        "not_before",
+        "expires_at",
+        "attempt",
+        "idempotency_key",
+        "required_firmware_capability",
+        "payload"
+      ],
+      "title": "CommandEnvelope",
+      "type": "object"
+    },
+    "StatelessTelemetryConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "telemetry_interval_seconds": {
+          "enum": [
+            2,
+            5,
+            10,
+            15,
+            30,
+            60
+          ],
+          "title": "Telemetry Interval Seconds",
+          "type": "integer"
+        },
+        "version": {
+          "exclusiveMinimum": 0,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "telemetry_interval_seconds"
+      ],
+      "title": "StatelessTelemetryConfiguration",
+      "type": "object"
+    },
+    "StatelessTelemetrySampleIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "boot_id": {
+          "title": "Boot Id",
+          "type": "string"
+        },
+        "sample_sequence": {
+          "exclusiveMinimum": 0,
+          "title": "Sample Sequence",
+          "type": "integer"
+        },
+        "sensor_id": {
+          "title": "Sensor Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sensor_id",
+        "boot_id",
+        "sample_sequence"
+      ],
+      "title": "StatelessTelemetrySampleIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "commands": {
+      "items": {
+        "$ref": "#/$defs/CommandEnvelope"
+      },
+      "title": "Commands",
+      "type": "array"
+    },
+    "configuration": {
+      "$ref": "#/$defs/StatelessTelemetryConfiguration"
+    },
+    "protocol_id": {
+      "const": "pm-protocol/1.0.0",
+      "default": "pm-protocol/1.0.0",
+      "title": "Protocol Id",
+      "type": "string"
+    },
+    "sample": {
+      "$ref": "#/$defs/StatelessTelemetrySampleIdentity"
+    },
+    "server_received_at": {
+      "format": "date-time",
+      "title": "Server Received At",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "accepted",
+        "duplicate"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "telemetry_protocol": {
+      "const": "pm-telemetry/2.0.0",
+      "default": "pm-telemetry/2.0.0",
+      "title": "Telemetry Protocol",
+      "type": "string"
+    },
+    "timestamp_source": {
+      "enum": [
+        "sensor",
+        "server"
+      ],
+      "title": "Timestamp Source",
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "server_received_at",
+    "sample",
+    "timestamp_source",
+    "configuration",
+    "commands"
+  ],
+  "title": "StatelessTelemetryResponse",
+  "type": "object"
+}

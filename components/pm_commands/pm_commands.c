@@ -12,10 +12,9 @@
 #include "pm_protocol.h"
 
 static const char *const type_names[PM_COMMAND_TYPE_COUNT] = {
-    "reboot", "maintenance_sleep", "sync_now", "diagnostics_snapshot", "network_self_test",
-    "meter_self_test", "storage_self_test", "format_storage_prepare", "format_storage_commit",
-    "apply_configuration", "rotate_device_credentials", "ota_install", "data_reset_prepare",
-    "data_reset_commit", "data_reset_cancel",
+    "reboot", "unsupported", "unsupported", "diagnostics_snapshot", "network_self_test",
+    "meter_self_test", "unsupported", "unsupported", "unsupported", "unsupported",
+    "unsupported", "ota_install", "unsupported", "unsupported", "unsupported",
 };
 
 static const char *const state_names[] = {
@@ -187,11 +186,9 @@ pm_command_boot_action_t pm_command_boot_action(const pm_command_t *command)
             return PM_COMMAND_BOOT_RECONCILE_OTA;
         }
         switch (command->type) {
-        case PM_COMMAND_SYNC_NOW:
         case PM_COMMAND_DIAGNOSTICS_SNAPSHOT:
         case PM_COMMAND_NETWORK_SELF_TEST:
         case PM_COMMAND_METER_SELF_TEST:
-        case PM_COMMAND_STORAGE_SELF_TEST:
             return PM_COMMAND_BOOT_REQUEUE;
         default:
             return PM_COMMAND_BOOT_FAIL_INTERRUPTED;
@@ -206,10 +203,8 @@ pm_command_boot_action_t pm_command_boot_action(const pm_command_t *command)
         }
         return PM_COMMAND_BOOT_FAIL_INTERRUPTED;
     }
-    if (command->state == PM_COMMAND_AWAITING_HEARTBEAT) {
-        return command->type == PM_COMMAND_MAINTENANCE_SLEEP ?
-               PM_COMMAND_BOOT_COMPLETE_WAKE : PM_COMMAND_BOOT_FAIL_INTERRUPTED;
-    }
+    if (command->state == PM_COMMAND_AWAITING_HEARTBEAT)
+        return PM_COMMAND_BOOT_FAIL_INTERRUPTED;
     return PM_COMMAND_BOOT_IGNORE;
 }
 
@@ -571,9 +566,16 @@ bool pm_command_type_from_name(const char *name, pm_command_type_t *type)
     if (name == NULL || type == NULL) {
         return false;
     }
-    for (size_t i = 0U; i < PM_COMMAND_TYPE_COUNT; ++i) {
-        if (strcmp(name, type_names[i]) == 0) {
-            *type = (pm_command_type_t)i;
+    static const struct { const char *name; pm_command_type_t type; } supported[] = {
+        {"reboot", PM_COMMAND_REBOOT},
+        {"diagnostics_snapshot", PM_COMMAND_DIAGNOSTICS_SNAPSHOT},
+        {"network_self_test", PM_COMMAND_NETWORK_SELF_TEST},
+        {"meter_self_test", PM_COMMAND_METER_SELF_TEST},
+        {"ota_install", PM_COMMAND_OTA_INSTALL},
+    };
+    for (size_t i = 0U; i < sizeof(supported) / sizeof(supported[0]); ++i) {
+        if (strcmp(name, supported[i].name) == 0) {
+            *type = supported[i].type;
             return true;
         }
     }

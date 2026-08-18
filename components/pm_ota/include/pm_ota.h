@@ -76,7 +76,7 @@ esp_err_t pm_ota_install(const pm_ota_manifest_t *manifest, const char *ca_pem,
 esp_err_t pm_ota_load_checkpoint(pm_ota_checkpoint_t *checkpoint);
 esp_err_t pm_ota_cancel_pending_boot(esp_err_t reason);
 esp_err_t pm_ota_post_boot_validate(bool config_readable, bool scheduler_running, bool watchdog_running,
-                                    bool storage_initialized_or_degraded, bool network_retry_capable);
+                                    bool telemetry_runtime_ready, bool network_retry_capable);
 
 #ifdef __cplusplus
 }

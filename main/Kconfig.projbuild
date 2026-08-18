@@ -48,24 +48,17 @@ config PM_PZEM_LIVE_VALIDATION
         marked-unit validation evidence and must never satisfy the stable
         production hardware-identity gate.
 
-config PM_HEARTBEAT_SECONDS
-    int "Heartbeat period in seconds"
-    range 5 300
-    default 15
+config PM_TELEMETRY_INTERVAL_SECONDS
+    int "Stateless telemetry interval in seconds"
+    range 2 60
+    default 5
+    help
+        The sensor samples continuously but sends only the newest RAM sample
+        at this cadence. The server may return another bounded value at runtime.
 
 config PM_METER_SAMPLE_MS
     int "PZEM sampling interval in milliseconds"
     range 250 60000
     default 1000
-
-config PM_DURABLE_INTERVAL_SECONDS
-    int "Durable interval duration in seconds"
-    range 10 3600
-    default 60
-
-config PM_SD_SPI_KHZ
-    int "Initial microSD SPI frequency in kHz"
-    range 400 20000
-    default 4000
 
 endmenu

@@ -402,7 +402,7 @@ static pm_command_t incoming_command(void)
     (void)snprintf(command.command_id, sizeof(command.command_id), "123e4567-e89b-42d3-a456-426614174000");
     (void)snprintf(command.idempotency_key, sizeof(command.idempotency_key), "test-command-1");
     (void)snprintf(command.payload, sizeof(command.payload), "{\"secret\":\"temporary\"}");
-    command.type = PM_COMMAND_SYNC_NOW;
+    command.type = PM_COMMAND_DIAGNOSTICS_SNAPSHOT;
     command.expires_utc_ms = INT64_C(2000000000000);
     return command;
 }
@@ -495,11 +495,9 @@ static int test_boot_action_state_type_matrix(void)
 {
     pm_command_t command = {0};
     static const pm_command_type_t replayable[] = {
-        PM_COMMAND_SYNC_NOW,
         PM_COMMAND_DIAGNOSTICS_SNAPSHOT,
         PM_COMMAND_NETWORK_SELF_TEST,
         PM_COMMAND_METER_SELF_TEST,
-        PM_COMMAND_STORAGE_SELF_TEST,
     };
     for (size_t state_index = 0U; state_index < 2U; ++state_index) {
         command.state = state_index == 0U ? PM_COMMAND_ACCEPTED : PM_COMMAND_RUNNING;
@@ -522,11 +520,9 @@ static int test_boot_action_state_type_matrix(void)
     CHECK(pm_command_boot_action(&command) == PM_COMMAND_BOOT_COMPLETE_REBOOT);
     command.type = PM_COMMAND_OTA_INSTALL;
     CHECK(pm_command_boot_action(&command) == PM_COMMAND_BOOT_RECONCILE_OTA);
-    command.type = PM_COMMAND_APPLY_CONFIGURATION;
+    command.type = PM_COMMAND_RESERVED_1;
     CHECK(pm_command_boot_action(&command) == PM_COMMAND_BOOT_FAIL_INTERRUPTED);
     command.state = PM_COMMAND_AWAITING_HEARTBEAT;
-    command.type = PM_COMMAND_MAINTENANCE_SLEEP;
-    CHECK(pm_command_boot_action(&command) == PM_COMMAND_BOOT_COMPLETE_WAKE);
     command.type = PM_COMMAND_REBOOT;
     CHECK(pm_command_boot_action(&command) == PM_COMMAND_BOOT_FAIL_INTERRUPTED);
     command.state = PM_COMMAND_SUCCEEDED;

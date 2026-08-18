@@ -1,0 +1,280 @@
+{
+  "$defs": {
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "evidence": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Evidence",
+          "type": "object"
+        },
+        "progress_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Progress Percent",
+          "type": "integer"
+        },
+        "result_code": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Result Code",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "running",
+            "succeeded",
+            "failed",
+            "awaiting_reboot",
+            "awaiting_heartbeat",
+            "rolled_back"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command_id",
+        "state",
+        "progress_percent",
+        "result_code"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One independently acceptable, latest-value telemetry sample.",
+  "properties": {
+    "active_power_w": {
+      "anyOf": [
+        {
+          "maximum": 300000.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Active Power W"
+    },
+    "boot_id": {
+      "maxLength": 36,
+      "minLength": 36,
+      "title": "Boot Id",
+      "type": "string"
+    },
+    "command_results": {
+      "items": {
+        "$ref": "#/$defs/CommandResult"
+      },
+      "maxItems": 16,
+      "title": "Command Results",
+      "type": "array"
+    },
+    "current_a": {
+      "anyOf": [
+        {
+          "maximum": 1000.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current A"
+    },
+    "firmware_build_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Firmware Build Id",
+      "type": "string"
+    },
+    "firmware_version": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Firmware Version",
+      "type": "string"
+    },
+    "frequency_hz": {
+      "anyOf": [
+        {
+          "maximum": 70.0,
+          "minimum": 40.0,
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Frequency Hz"
+    },
+    "power_factor": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Power Factor"
+    },
+    "pzem_energy_wh": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pzem Energy Wh"
+    },
+    "pzem_status": {
+      "enum": [
+        "ok",
+        "timeout",
+        "bad_crc",
+        "short_frame",
+        "wrong_address",
+        "invalid",
+        "absent"
+      ],
+      "title": "Pzem Status",
+      "type": "string"
+    },
+    "sample_sequence": {
+      "exclusiveMinimum": 0,
+      "title": "Sample Sequence",
+      "type": "integer"
+    },
+    "sampled_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Sampled At"
+    },
+    "sensor_id": {
+      "maxLength": 36,
+      "minLength": 36,
+      "title": "Sensor Id",
+      "type": "string"
+    },
+    "telemetry_protocol": {
+      "const": "pm-telemetry/2.0.0",
+      "title": "Telemetry Protocol",
+      "type": "string"
+    },
+    "time_status": {
+      "enum": [
+        "trusted",
+        "untrusted",
+        "stepped",
+        "disputed"
+      ],
+      "title": "Time Status",
+      "type": "string"
+    },
+    "uptime_ms": {
+      "minimum": 0,
+      "title": "Uptime Ms",
+      "type": "integer"
+    },
+    "voltage_v": {
+      "anyOf": [
+        {
+          "maximum": 300.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Voltage V"
+    },
+    "wifi_rssi": {
+      "anyOf": [
+        {
+          "maximum": 0,
+          "minimum": -127,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Wifi Rssi"
+    }
+  },
+  "required": [
+    "telemetry_protocol",
+    "sensor_id",
+    "boot_id",
+    "sample_sequence",
+    "sampled_at",
+    "uptime_ms",
+    "pzem_status",
+    "firmware_version",
+    "firmware_build_id",
+    "time_status"
+  ],
+  "title": "StatelessTelemetryRequest",
+  "type": "object"
+}
