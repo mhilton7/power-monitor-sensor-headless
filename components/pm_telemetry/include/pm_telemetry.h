@@ -46,6 +46,8 @@ void pm_telemetry_backoff_reset(pm_telemetry_backoff_t *backoff, int64_t now_us)
 uint32_t pm_telemetry_backoff_fail(pm_telemetry_backoff_t *backoff, int64_t now_us,
                                    uint32_t random_value);
 bool pm_telemetry_backoff_due(const pm_telemetry_backoff_t *backoff, int64_t now_us);
+int64_t pm_telemetry_next_fixed_deadline(int64_t previous_deadline_us, int64_t now_us,
+                                         int64_t period_us);
 
 #ifdef __cplusplus
 }

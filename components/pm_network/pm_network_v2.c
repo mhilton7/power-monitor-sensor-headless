@@ -190,7 +190,8 @@ void pm_network_telemetry_complete(pm_network_scheduler_t *scheduler, int64_t no
     scheduler->request_in_progress = false;
     if (success) {
         pm_telemetry_backoff_reset(&scheduler->server_backoff, now_us);
-        scheduler->next_telemetry_us = now_us + scheduler->telemetry_period_us;
+        scheduler->next_telemetry_us = pm_telemetry_next_fixed_deadline(
+            scheduler->next_telemetry_us, now_us, scheduler->telemetry_period_us);
     } else {
         const uint32_t delay = pm_telemetry_backoff_fail(&scheduler->server_backoff,
                                                          now_us, random_value);
@@ -937,13 +938,13 @@ static void network_task(void *argument)
             const esp_err_t error = send_current_telemetry(context, &task->io,
                                                            &telemetry_seconds);
             secure_zero_memory(&task->io, sizeof(task->io));
-            const bool success = error == ESP_OK || error == ESP_ERR_NOT_FOUND;
-            pm_network_telemetry_complete(&scheduler, esp_timer_get_time(), success,
-                                          esp_random());
             if (error == ESP_OK && telemetry_seconds >= PM_TELEMETRY_MIN_SECONDS &&
                 telemetry_seconds <= PM_TELEMETRY_MAX_SECONDS) {
                 scheduler.telemetry_period_us = (int64_t)telemetry_seconds * INT64_C(1000000);
             }
+            const bool success = error == ESP_OK || error == ESP_ERR_NOT_FOUND;
+            pm_network_telemetry_complete(&scheduler, esp_timer_get_time(), success,
+                                          esp_random());
             pm_network_health_update(context, PM_HEALTH_SERVER_UNAVAILABLE,
                                      !success);
             if (!success) {

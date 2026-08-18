@@ -244,6 +244,20 @@ class StatelessTelemetryContractTests(unittest.TestCase):
         for interval in (2, 5, 10, 15, 30, 60):
             self.assertIn(f"seconds == {interval}U", source)
 
+    def test_successful_telemetry_uses_fixed_deadlines_without_latency_drift(self) -> None:
+        network = (
+            ROOT / "components" / "pm_network" / "pm_network_v2.c"
+        ).read_text(encoding="utf-8")
+        policy = (
+            ROOT / "components" / "pm_telemetry" / "pm_telemetry.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn("pm_telemetry_next_fixed_deadline", network)
+        self.assertNotIn(
+            "scheduler->next_telemetry_us = now_us + scheduler->telemetry_period_us",
+            network,
+        )
+        self.assertIn("elapsed_us / period_us + 1", policy)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
