@@ -1,8 +1,8 @@
-# PowerMeter Sensor Headless 0.1.0-rc.22
+# PowerMeter Sensor Headless 0.1.0-rc.23
 
-RC22 is the coordinated stateless-firmware evidence and lifecycle release for PowerMeter V2 server `v0.1.0-rc.22` (deterministic firmware build 25). The active runtime is unchanged from the already-correct stateless transport: successful delivery advances from the prior scheduled deadline and skips only genuinely missed slots when a request exceeds the interval. It retains `pm-telemetry/2.0.0` plus authenticated control, enrollment, provisioning, and OTA under `pm-protocol/1.0.0`. The generated server OpenAPI document is bound by the exact SHA-256 recorded in `test/vectors/server-contract.json` and the release compatibility asset.
+RC23 is the metadata-only coordinated firmware candidate for corrected PowerMeter V2 server `v0.1.0-rc.23` (deterministic firmware build 26). Runtime sources, partition layout, sdkconfig profiles, and dependency locks remain byte-identical to public firmware RC22. The image is rebuilt under the new immutable semantic version, so its embedded ESP-IDF application descriptor, ELF build identifier, and image digest must be independently verified and must not reuse RC22 values. It retains `pm-telemetry/2.0.0` plus authenticated control, enrollment, provisioning, and OTA under `pm-protocol/1.0.0`. The generated server OpenAPI document is bound by the exact SHA-256 recorded in `test/vectors/server-contract.json` and the release compatibility asset.
 
-RC17 remains immutable failed-candidate evidence. RC18 through RC21 remain immutable public evidence and are never moved, rewritten, or relabeled.
+RC17 remains immutable failed-candidate evidence. RC18 through RC21 remain immutable public evidence and are never moved, rewritten, or relabeled. Firmware RC22 remains immutable public evidence; its signed tag and release assets are not moved or reused after the coordinated server RC22 deployment smoke failed before server release publication.
 
 Production firmware no longer links or starts the microSD storage, interval, backlog, adaptive-batch, contiguous-acknowledgement, or missing-prefix components. It never mounts, reads, writes, repairs, verifies, erases, or formats an inserted card. Existing accepted server History is not changed, and legacy firmware source remains only as unbuilt audit history. Public RC15 and RC16 remain immutable and installable.
 
@@ -16,4 +16,4 @@ Sensor identity, Wi-Fi/static-IP/DNS settings, server origin, CA, enrolled direc
 
 The ESP-IDF post-boot rollback check proves only that configuration, required tasks, watchdogs, stateless telemetry runtime, and bounded network retry capability were created. That local validation does not complete the server-side OTA deployment. The server must keep the deployment pending until the same authenticated sensor later reports the expected semantic version and complete 64-character lowercase ELF build identifier.
 
-RC22 remains a release candidate: `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED=n`, hardware certification is pending, and no physical sensor migration or OTA success is claimed by this release build. Stable promotion still requires exact marked-unit electrical, rollback, recovery, and soak evidence.
+RC23 remains a release candidate: `CONFIG_PM_HARDWARE_IDENTITY_VERIFIED=n`, hardware certification is pending, and no physical sensor migration or OTA success is claimed by this release build. Stable promotion still requires exact marked-unit electrical, rollback, recovery, and soak evidence.
