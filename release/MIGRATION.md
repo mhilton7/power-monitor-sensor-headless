@@ -1,14 +1,16 @@
-# Migration from the reference sensor
+# Migration to stateless sensor firmware
 
-This repository is a clean implementation. It does not import the reference firmware's configuration, sequence state, microSD files, credentials, or application code.
+Deploy server support for `pm-telemetry/2.0.0` before installing this firmware. Confirm independent sample acceptance, live-state updates, History bucketing, and continued legacy-firmware service during the transition.
 
-Migration is a controlled replacement:
+For each existing sensor:
 
-1. Export no secrets or readings from the legacy sensor.
-2. Build and flash this release candidate to a separately identified ESP32-S3 test unit.
-3. Provision it with a new one-time server enrollment token and verify the displayed device fingerprint.
-4. Complete the marked-unit hardware certification before stable deployment.
-5. Run both sensors only if their CT placement and server scopes avoid double counting.
-6. Retire or unclaim the old device through the server only after the new device has healthy authenticated heartbeats and readings.
+1. Record its immutable sensor ID, display name, reported version/build ID, and the presence—not the values—of Wi-Fi/TLS/enrollment configuration.
+2. Install the signed, digest-verified OTA image without erasing NVS and without formatting or inspecting the microSD card.
+3. Keep deployment pending while the sensor reboots. Local ESP-IDF post-boot validation is not server confirmation.
+4. Require a later authenticated telemetry-v2 sample from the same sensor ID with the expected semantic version and complete 64-character lowercase ELF build ID.
+5. Verify current telemetry, visible connection gaps, Wi-Fi recovery, server recovery, identity preservation, and configuration preservation.
+6. Migrate the second sensor only after the first remains healthy.
 
-Legacy microSD records are not accepted or translated because their identity, sequence, and evidence semantics are not this protocol's immutable journal format.
+After both sensors report telemetry v2, disable active legacy backlog processing on the server, remove SD/backlog controls from the browser, and retain accepted server History and legacy synchronization records as read-only evidence. Never translate a card journal into current telemetry, wait for a contiguous acknowledgement, erase NVS, or format either physical card.
+
+Do not automatically flash or deploy a physical sensor from tests or release automation. Stable installation remains blocked until the exact marked-unit `pm-hardware-certification/2.0.0` evidence passes.

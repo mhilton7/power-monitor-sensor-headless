@@ -1,45 +1,17 @@
 # Testing
 
-Run all host evidence from the repository root:
+Run the current host evidence from the repository root:
 
 ```powershell
 .\tools\Run-HostTests.ps1
 ```
 
-The runner first executes the native PowerShell provisioning UX regressions,
-then the full discovered Python host suite, the named 36-case
-power/config/format/OTA/SD/PZEM/network/server/command fault matrix, and an
-accelerated 120-day integration. The PowerShell cases exercise HTTPS-origin
-canonicalization/rejection, local `tls-ca.crt` validation and device size
-limits before COM access, Windows semaphore/read/write timeout classification,
-one ordinary read timeout followed by a delayed device response, the actionable
-final request deadline, the pre-attempt rollback, unconfirmed commit, and
-confirmed-commit reboot boundaries, reset/log guidance, and secret redaction. They can
-also run directly:
+The runner checks its selected Python interpreter before starting and fails with an actionable dependency message; it never installs floating packages. Use `-PythonPath <path>` for an existing environment populated from the fully hashed `test/host/requirements.txt` lock.
 
-```powershell
-.\test\powershell\ProvisioningUx.Tests.ps1
-```
+The stateless-focused suites validate the mirrored telemetry-v2 contract, independent acceptance identity, missing-sample 10 followed by sample 11, latest-value replacement, a strict two-sample RAM bound, 100,000 repeated offers, bounded Wi-Fi/server backoff, fixed cadence, no active SD/FATFS/storage graph, no telemetry NVS calls, no flash erase, preserved configuration/identity/OTA paths, exact build ID, command-result commit semantics, and release/HIL evidence shape.
 
-The integration covers 10,368,000 one-second samples, 172,800 durable
-intervals, randomized outages/restarts/corruption, backlog/ack, commands, OTA,
-and time trust. CI additionally compiles and runs 63 pure production C
-parser/aggregation/journal assertions with `-Wall -Wextra -Werror`, repeats
-them under ASan/UBSan, and builds the entire ESP-IDF image.
+The repository also retains tests for unbuilt legacy storage/backlog source as historical regression evidence. Their pass result does not mean that storage, backlog, contiguous acknowledgement, destructive storage commands, or legacy heartbeat synchronization is linked into the production image. CI labels those steps as legacy audit evidence and separately builds the active stateless graph.
 
-Assertions include PZEM request/CRC/ranges; energy reset/rollover; missing-vs-zero; deterministic record/CRC; trailing recovery/index/retention; A/B config and sequence reservation; ack monotonicity/card replacement; state/backoff/heartbeat priority; TLS classification; HMAC canonicalization/HKDF/replay; command expiry/idempotency/prepare; credential-rotation crashes at every durable boundary, old/new key transition, expiry/cancel/zeroization; OTA hash/compatibility/rollback; COM transaction/redaction; no old-data replay; and no deadlock/permanent latch.
+CI uses pinned ESP-IDF v6.0.2, builds the release-candidate profile, verifies the active component inventory and PZEM cadence, enforces the OTA slot limit, and audits first-party stack frames. Native pure-C tests compile with warnings as errors; supported CI runners repeat suitable legacy audit parsers under sanitizers.
 
-Physical HIL requires an isolated fixture, actual marked unit, Python dependencies in `test/hardware/requirements.txt`, a controller token supplied only as `PM_HIL_FIXTURE_TOKEN`, and at least 72 hours:
-
-```powershell
-python -m pip install --require-hashes -r .\test\hardware\requirements.txt
-idf.py -B build-certification `
-  -D 'SDKCONFIG=build-certification/sdkconfig' `
-  -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.release' `
-  -D 'PM_FIRMWARE_VERSION=0.1.0' set-target esp32s3 build
-.\tools\Run-HardwareCertification.ps1 -Port COM7 -Fixture C:\Secure\marked-unit-fixture.json `
-  -FirmwareBin .\build-certification\power-monitor-sensor-headless.bin -Version 0.1.0 `
-  -DurationHours 72 -Output C:\Secure\hardware-certification.json
-```
-
-The wrapper converts the interactive secure token only for the child process and clears it immediately; do not put it in command history or source control. Hardware was unavailable for this RC, so no physical pass is claimed.
+Physical certification uses `pm-hardware-certification/2.0.0`. It requires the marked ESP32-S3/PZEM/CT, isolated electrical measurements, proof that no SD or telemetry-NVS runtime access occurs, independent/later-sample acceptance, latest-value outage recovery, identity/config preservation, Wi-Fi/server recovery, TLS/HMAC rejection, OTA success/rollback/identity confirmation, COM recovery, watchdog recovery, bounded resident telemetry memory, and a continuous 72-hour soak. No physical pass is claimed in this repository.

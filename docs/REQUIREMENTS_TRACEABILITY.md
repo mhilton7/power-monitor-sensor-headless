@@ -1,23 +1,19 @@
-# Firmware requirements traceability
+# Stateless firmware traceability
 
-| Master section | Implementation/evidence | Status |
-|---|---|---|
-| 4 hardware/wiring | authoritative `pm_board.h`; candidate gated driver; HARDWARE_IDENTITY/REFERENCES/WIRING; HIL schema | RC complete; physical identity pending |
-| 5 repository/toolchain | independent components; ESP-IDF 6.0.2/cJSON pins; configs/partitions; warnings-as-errors | automated |
-| 6 states/tasks | `pm_state`; static queues; measurement/interval/storage/network/control/supervisor/ephemeral OTA/USB ownership | automated plus HIL stack margin pending |
-| 7 COM provisioning | `pm-com/1.0.0`; A/B begin/test/commit/rollback; three PowerShell tools; redaction/physical reset | host-tested; physical USB pending |
-| 8 PZEM | Modbus CRC/parser/status/ranges; fixed point; cumulative delta only; missing/zero/reset/rollover/CT flags | parser host-tested; marked hardware pending |
-| 9 trusted time | redundant checkpoint; monotonic progression; SNTP/server sources; untrusted records never fabricated | host/fault simulation |
-| 10 microSD | deterministic CRC journal/decoder; NVS sequence blocks/ack; recovery/quarantine/index; explicit format | host/fault simulation; physical endurance pending |
-| 11 network/TLS | event Wi-Fi/backoff; one TLS owner; CA/hostname; bounded requests; heartbeat-first batching | simulation; physical recovery timing pending |
-| 12 authentication | protocol 1.0.0; exact shared HKDF/base64 HMAC vectors; authenticated response hash/signature/timestamp/replay verification; exact enroll/heartbeat/readings/permanent-loss schemas/routes; immutable retry/ack | locked fixtures and live cross-repository schema/OpenAPI gate |
-| 13 commands | A/B CRC ledger/all required types/states/idempotency/expiry/progress; token-zeroized destructive intent; restartable destructive and credential-rotation phase journals; old-to-new directional-key cutover; authenticated-result-ack cleanup | exhaustive crash-at-every-phase host models plus ESP-IDF build; physical power-cut HIL pending |
-| 14 OTA | HMAC per-device manifest; inactive slot/stream hash/metadata/checkpoint/postboot rollback | host/fault plus build; physical success/rollback pending |
-| 26 supply chain | CI/build/security/dependency/SBOM/provenance/release workflows; exact action/toolchain pins | local/workflow evidence; remote publication owned by release parent |
-| 27 tests | host C/Python including credential-rotation reboot/expiry/key-cutover, 36 faults, 120-day simulator, physical HIL runner/verifier/schema | automated pass; HIL pending |
-| 28 reliability | isolation/heartbeat/recovery/data/storage/OTA assertions and measured release reports | simulation pass; heap/stack/physical timing pending |
-| 29 docs | every named firmware document plus security/traceability/migration/release notes | complete |
-| 30 artifacts | assembler creates binaries/merged image/flash args/manifest/checksums/SBOM/provenance/reports/scripts | local RC artifact evidence |
-| 31 Git discipline | checkpoint plus logical commits on feature branch; workflow prevents failed stable promotion | complete locally; no remote publication in delegated scope |
+The active build is `main/app_main_stateless.c` plus the component dependencies reachable from `main/CMakeLists.txt`. Legacy storage, interval, backlog, and heartbeat source is retained only as unbuilt audit history.
 
-Cross-cutting invariant: firmware has no utility-bill input. Every durable usage/History value is created only from authenticated PZEM evidence. One-CT default scope remains `energy_only`.
+| Required firmware proof | Production evidence | Automated evidence | Physical status |
+|---|---|---|---|
+| 1–3: build without SD; never mount/write SD | active graph excludes `pm_storage`, FATFS, SDMMC and all SD pins | `test_stateless_telemetry.py` active-graph/source scan | HIL `no_sd_runtime_access` pending |
+| 4: no telemetry NVS | telemetry slot/backoff are fixed RAM structs; config/command/OTA recovery only use NVS | active telemetry source rejects NVS APIs | HIL `no_telemetry_nvs_writes` pending |
+| 5–6: independent samples; 10 does not block 11 | `(sensor_id, boot_id, sample_sequence)` with RAM-only per-boot sequence | `test_pm_telemetry.c`, mirrored schemas/vectors | HIL independent/gap cases pending |
+| 7–8: no persistent queue; newest pending replaces older | one in-flight plus newest pending; failed sample cleared | 100,000-offer bound and replacement assertions | HIL latest-value outage case pending |
+| 9–10: outages never factory-reset | ordinary retry path has no restart, erase, or config mutation | active-source scan and bounded retry tests | Wi-Fi/server recovery HIL pending |
+| 11–12: recovery resumes telemetry | Wi-Fi success resets both backoffs and makes telemetry due now; server success resets server backoff | scheduler/backoff tests and source-order assertions | recovery HIL pending |
+| 13–15: identity, Wi-Fi, OTA survive reboot | immutable identity NVS, A/B config, CRC OTA/command checkpoints remain | config/command/OTA recovery regressions and active-source checks | preservation HIL pending |
+| 16: watchdog safety | required runtime tasks register and reset watchdogs | startup/source tests and stack-frame audit | watchdog HIL pending |
+| 17: stable memory during outage | fixed telemetry structs; one bounded network workspace; no growing queue | 100,000-offer test and resident-count bound | repeated-outage/72-hour HIL pending |
+| 18–19: no SD format or NVS erase | no active format command and no `nvs_flash_erase`/`nvs_erase_all` in runtime graph | active-source and command-map scans | no-SD HIL pending |
+| 20: OTA version confirmation | reports SemVer and 64-char ELF build ID after local boot validation | contract/build-ID/OTA ordering tests | server confirmation and OTA HIL pending |
+
+Control/authentication/OTA remain `pm-protocol/1.0.0`; independent telemetry is the additive `pm-telemetry/2.0.0` contract. No physical certification or successful sensor deployment is inferred from host/build evidence.

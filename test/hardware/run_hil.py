@@ -17,12 +17,19 @@ from pathlib import Path
 import jsonschema
 import serial
 
-CASES = (
-    'pzem_authenticated_samples', 'crc_rejection', 'wrong_slave_rejection', 'sd_recovery',
-    'sequence_monotonic', 'ack_replay', 'https_chain', 'https_hostname', 'hmac_replay',
-    'ota_success', 'ota_rollback', 'com_recovery', 'watchdog_recovery',
-    'sd_write_endurance', 'wifi_ap_reboot', 'server_restart', 'dns_outage', 'physical_power_cycle',
+CERTIFICATION_CASES = (
+    'pzem_authenticated_samples', 'crc_rejection', 'wrong_slave_rejection',
+    'no_sd_runtime_access', 'no_telemetry_nvs_writes',
+    'independent_sample_acceptance', 'later_sample_after_gap', 'latest_value_after_outage',
+    'wifi_recovery', 'server_recovery', 'identity_preserved', 'configuration_preserved',
+    'https_chain', 'https_hostname', 'hmac_replay', 'ota_success', 'ota_rollback',
+    'ota_identity_confirmed', 'com_recovery', 'watchdog_recovery',
 )
+STRESS_CASES = (
+    'wifi_ap_reboot', 'server_restart', 'dns_outage', 'physical_power_cycle',
+    'repeated_outage_memory_stability',
+)
+CASES = CERTIFICATION_CASES + STRESS_CASES
 
 
 def canonical_digest(document: dict) -> str:
@@ -111,36 +118,55 @@ def main() -> int:
     soak_reboots = 0
     soak_unexplained_reboots = 0
     soak_gaps = 0
-    soak_regressions = 0
+    maximum_resident_samples = 0
+    soak_identity_changes = 0
+    soak_configuration_losses = 0
     end_monotonic = time.monotonic() + args.duration_hours * 3600
     while time.monotonic() < end_monotonic:
         result = controller(fixture['controller_origin'], 'soak_checkpoint', token)
+        required_counts = (
+            'samples_attempted', 'samples_authenticated', 'reboots',
+            'unexplained_reboots', 'data_gaps', 'maximum_resident_telemetry_samples',
+            'identity_changes', 'configuration_losses',
+        )
+        if any(type(result.get(name)) is not int or result[name] < 0 for name in required_counts):
+            raise RuntimeError('soak checkpoint omitted a nonnegative integer counter')
         soak_samples += int(result.get('samples_attempted', 0))
         soak_authenticated += int(result.get('samples_authenticated', 0))
         soak_reboots += int(result.get('reboots', 0))
         soak_unexplained_reboots += int(result.get('unexplained_reboots', 0))
         soak_gaps += int(result.get('data_gaps', 0))
-        soak_regressions += int(result.get('sequence_regressions', 0))
+        maximum_resident_samples = max(
+            maximum_resident_samples,
+            int(result.get('maximum_resident_telemetry_samples', 0)),
+        )
+        soak_identity_changes += int(result.get('identity_changes', 0))
+        soak_configuration_losses += int(result.get('configuration_losses', 0))
         time.sleep(min(60, max(1, end_monotonic - time.monotonic())))
     ended = dt.datetime.now(dt.timezone.utc)
-    all_tests = {name: bool(case_results[name]['pass']) for name in CASES[:13]}
+    all_tests = {name: bool(case_results[name]['pass']) for name in CERTIFICATION_CASES}
     all_fixture_cases_pass = all(result['pass'] for result in case_results.values())
     soak_pass = (0 < soak_authenticated <= soak_samples and soak_unexplained_reboots == 0 and
-                 soak_regressions == 0 and all_fixture_cases_pass)
+                 1 <= maximum_resident_samples <= 2 and soak_identity_changes == 0 and
+                 soak_configuration_losses == 0 and all_fixture_cases_pass)
     document = {
-        'schema':'pm-hardware-certification/1.0.0','evidence_id':str(uuid.uuid4()),
+        'schema':'pm-hardware-certification/2.0.0','evidence_id':str(uuid.uuid4()),
         'generated_at':ended.replace(microsecond=0).isoformat().replace('+00:00','Z'),
         'result':'pass' if all(all_tests.values()) and soak_pass else 'fail',
         'firmware':{'repository':'https://github.com/mhilton7/power-monitor-sensor-headless','commit':commit,'image_sha256':firmware_hash,
                     'version':args.version,'esp_idf_version':'v6.0.2','target':'esp32s3',
-                    'board_profile':'esp32-s3-devkitc-n16r8-reference/1','protocol':'pm-protocol/1.0.0'},
+                    'board_profile':'esp32-s3-devkitc-n16r8-reference/1',
+                    'protocol':'pm-protocol/1.0.0','telemetry_protocol':'pm-telemetry/2.0.0'},
         'marked_unit':fixture['marked_unit'],'electrical':fixture['electrical'],'tests':all_tests,
         'soak':{'started_at':started.replace(microsecond=0).isoformat().replace('+00:00','Z'),
                 'ended_at':ended.replace(microsecond=0).isoformat().replace('+00:00','Z'),
                 'duration_hours':(ended-started).total_seconds()/3600,'samples_attempted':soak_samples,
                 'samples_authenticated':soak_authenticated,'reboots':soak_reboots,
                 'unexplained_reboots':soak_unexplained_reboots,
-                'data_gaps':soak_gaps,'sequence_regressions':soak_regressions,'pass':soak_pass},
+                'data_gaps':soak_gaps,
+                'maximum_resident_telemetry_samples':maximum_resident_samples,
+                'identity_changes':soak_identity_changes,
+                'configuration_losses':soak_configuration_losses,'pass':soak_pass},
         'signoff':{'operator':fixture['operator'],'reviewer':fixture['reviewer'],'record_sha256':''},
     }
     document['signoff']['record_sha256'] = canonical_digest(document)

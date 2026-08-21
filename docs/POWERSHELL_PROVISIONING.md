@@ -24,7 +24,7 @@ the origin and certificate before opening the COM port. `ServerOrigin` accepts
 one optional trailing slash and removes it; it still rejects insecure HTTP,
 paths, query strings, fragments, and user information.
 
-Static mode additionally requires `-Ipv4Address`, `-Ipv4Gateway`, `-Ipv4Netmask`, and `-DnsPrimary`; `-DnsSecondary` is optional. The script discovers ports when `-Port` is omitted and displays only a SHA-256-derived device fingerprint, firmware version, provisioning state, and sequence floor.
+Static mode additionally requires `-Ipv4Address`, `-Ipv4Gateway`, `-Ipv4Netmask`, and `-DnsPrimary`; `-DnsSecondary` is optional. The script discovers ports when `-Port` is omitted and displays only a SHA-256-derived device fingerprint, firmware version, and provisioning state.
 
 The device writes the inactive config slot, reads and CRC-checks it, then tests association, IP, DNS/TLS chain and hostname, and one-time enrollment. Only after all stages pass does it atomically select that slot. A failed stage invokes rollback and preserves the prior committed slot. Wi-Fi password, token, device secret, directional HMAC keys, private keys, cookies, and administrator credentials are never echoed. Avoid PowerShell transcription while entering secrets.
 

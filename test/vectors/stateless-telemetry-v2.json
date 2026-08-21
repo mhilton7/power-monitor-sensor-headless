@@ -1,7 +1,7 @@
 {
-  "body_sha256": "1a51696ea6f12088219917619699a71fdc15bee513703e46539ba37ff8e527fa",
-  "canonical_body_utf8": "{\"active_power_w\":\"270.500\",\"boot_id\":\"223e4567-e89b-12d3-a456-426614174000\",\"command_results\":[],\"current_a\":\"1.2500\",\"firmware_build_id\":\"elf-sha256-example\",\"firmware_version\":\"0.1.0-rc.17\",\"frequency_hz\":\"59.990\",\"power_factor\":\"0.9010\",\"pzem_energy_wh\":123456,\"pzem_status\":\"ok\",\"sample_sequence\":42,\"sampled_at\":\"2026-08-17T12:00:00Z\",\"sensor_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"telemetry_protocol\":\"pm-telemetry/2.0.0\",\"time_status\":\"trusted\",\"uptime_ms\":210000,\"voltage_v\":\"240.125\",\"wifi_rssi\":-55}",
-  "canonical_utf8": "PM-HMAC-SHA256-V1\nPOST\n/api/v1/device/telemetry/v2\n1786968000\nstateless-v2-fixed-nonce-00000001\n1a51696ea6f12088219917619699a71fdc15bee513703e46539ba37ff8e527fa",
+  "body_sha256": "3d14f6f1c3def12d67a815e934455945896a40bf55de3bc7185f39d953b96d68",
+  "canonical_body_utf8": "{\"active_power_w\":\"270.500\",\"boot_id\":\"223e4567-e89b-12d3-a456-426614174000\",\"command_results\":[],\"current_a\":\"1.2500\",\"firmware_build_id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"firmware_version\":\"0.1.0-rc.17\",\"frequency_hz\":\"59.990\",\"power_factor\":\"0.9010\",\"pzem_energy_wh\":123456,\"pzem_status\":\"ok\",\"sample_sequence\":42,\"sampled_at\":\"2026-08-17T12:00:00Z\",\"sensor_id\":\"123e4567-e89b-12d3-a456-426614174000\",\"telemetry_protocol\":\"pm-telemetry/2.0.0\",\"time_status\":\"trusted\",\"uptime_ms\":210000,\"voltage_v\":\"240.125\",\"wifi_rssi\":-55}",
+  "canonical_utf8": "PM-HMAC-SHA256-V1\nPOST\n/api/v1/device/telemetry/v2\n1786968000\nstateless-v2-fixed-nonce-00000001\n3d14f6f1c3def12d67a815e934455945896a40bf55de3bc7185f39d953b96d68",
   "control_protocol_header": "pm-protocol/1.0.0",
   "idempotency_key": [
     "sensor_id",
@@ -15,7 +15,7 @@
     "boot_id": "223e4567-e89b-12d3-a456-426614174000",
     "command_results": [],
     "current_a": "1.2500",
-    "firmware_build_id": "elf-sha256-example",
+    "firmware_build_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "firmware_version": "0.1.0-rc.17",
     "frequency_hz": "59.990",
     "power_factor": "0.9010",
@@ -30,7 +30,7 @@
     "voltage_v": "240.125",
     "wifi_rssi": -55
   },
-  "signature_base64": "O0E9Jq+TG6DdUU22ydKyGtHUdeThvlvNLHvpDBoziNk=",
+  "signature_base64": "bU+GG0QLBwqlTYVED5qXUQClj2gBn6Vftwg9ccznhW8=",
   "success_status_values": [
     "accepted",
     "duplicate"

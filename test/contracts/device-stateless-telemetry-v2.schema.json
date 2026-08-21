@@ -117,8 +117,7 @@
       "title": "Current A"
     },
     "firmware_build_id": {
-      "maxLength": 128,
-      "minLength": 1,
+      "pattern": "^[0-9a-f]{64}$",
       "title": "Firmware Build Id",
       "type": "string"
     },

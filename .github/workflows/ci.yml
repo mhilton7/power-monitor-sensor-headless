@@ -25,7 +25,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check --require-hashes -r test/host/requirements.txt
       - name: Python model, fault matrix, and 120-day simulation
         run: python tools/run_host_tests.py
-      - name: Compile and run production pure-C unit tests
+      - name: Compile and run unbuilt legacy journal regression evidence
         run: >-
           cc -std=c11 -Wall -Wextra -Werror
           -Itest/host/stubs -Icomponents/pm_meter/include -Icomponents/pm_measurement/include
@@ -79,11 +79,18 @@ jobs:
             components/pm_network/pm_command_envelope.c -o "$RUNNER_TEMP/test_pm_ota_policy"
           "$RUNNER_TEMP/test_pm_ota_policy"
           cc -std=c11 -Wall -Wextra -Werror \
+            -Itest/host/stubs -Icomponents/pm_config/include -Icomponents/pm_meter/include \
+            -Icomponents/pm_telemetry/include test/host/test_pm_telemetry.c \
+            components/pm_telemetry/pm_telemetry.c -o "$RUNNER_TEMP/test_pm_telemetry"
+          "$RUNNER_TEMP/test_pm_telemetry"
+      - name: Compile and run unbuilt legacy backlog policy evidence
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
             -Icomponents/pm_network/include \
             test/host/test_pm_backlog_policy.c components/pm_network/pm_backlog_policy.c \
             -o "$RUNNER_TEMP/test_pm_backlog_policy"
           "$RUNNER_TEMP/test_pm_backlog_policy"
-      - name: Run production pure-C tests under ASan and UBSan
+      - name: Run unbuilt legacy journal evidence under ASan and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1
@@ -107,7 +114,7 @@ jobs:
           test/host/test_pm_meter_io.c components/pm_meter/pm_meter.c
           components/pm_meter/pm_meter_pzem_v4_classic.c
           -o "$RUNNER_TEMP/test_pm_meter_io_sanitized" && "$RUNNER_TEMP/test_pm_meter_io_sanitized"
-      - name: Run backlog policy regression under ASan and UBSan
+      - name: Run unbuilt legacy backlog evidence under ASan and UBSan
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1
@@ -118,6 +125,18 @@ jobs:
           test/host/test_pm_backlog_policy.c components/pm_network/pm_backlog_policy.c
           -o "$RUNNER_TEMP/test_pm_backlog_policy_sanitized" &&
           "$RUNNER_TEMP/test_pm_backlog_policy_sanitized"
+      - name: Run active stateless telemetry policy under ASan and UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: >-
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror
+          -fsanitize=address,undefined -fno-omit-frame-pointer
+          -Itest/host/stubs -Icomponents/pm_config/include -Icomponents/pm_meter/include
+          -Icomponents/pm_telemetry/include test/host/test_pm_telemetry.c
+          components/pm_telemetry/pm_telemetry.c
+          -o "$RUNNER_TEMP/test_pm_telemetry_sanitized" &&
+          "$RUNNER_TEMP/test_pm_telemetry_sanitized"
 
   esp-idf-build:
     runs-on: ubuntu-24.04

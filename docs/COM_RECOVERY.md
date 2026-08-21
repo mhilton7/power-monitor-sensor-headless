@@ -1,13 +1,8 @@
 # COM recovery
 
-`RECOVERY_COM` is entered for missing/invalid configuration, repeated failure of a never-valid candidate, physical GPIO0 recovery request, incompatible rollback configuration, or a boot-loop threshold. A temporary server/AP outage is not a recovery trigger.
+USB recovery is entered only when configuration is missing or a configured unit receives the debounced physical GPIO0 recovery request during the three-second application window. An ordinary AP, DNS, TLS, or server outage remains in headless retry and does not enter recovery.
 
-For a configured unit, reset with BOOT/GPIO0 released so the ROM starts the
-installed firmware. When the boot log announces the three-second physical
-recovery window, press and hold BOOT until the log confirms the debounced
-request, then release it. Normal configured boots deliberately wait for this
-bounded three-second window; holding BOOT during reset instead enters the ROM
-download strap and does not request application recovery.
+For a configured unit, reset with BOOT/GPIO0 released so the installed application starts. During the logged three-second recovery window, press and hold BOOT until the application confirms the request, then release it. Holding BOOT during reset selects the ROM download strap instead of application recovery.
 
 ```powershell
 .\tools\Repair-PowerMeterSensor.ps1 -Port COM7 -Action Status
@@ -15,26 +10,8 @@ download strap and does not request application recovery.
 .\tools\Repair-PowerMeterSensor.ps1 -Port COM7 -Action SafeReboot
 ```
 
-Recovery exposes only a redacted fingerprint/status. Recovery is an isolated
-maintenance boot: the normal meter, measurement, journaling producer, command,
-network, and OTA tasks are not started while candidate Wi-Fi/configuration is
-being tested. Candidate rollback does not erase the committed slot, and the
-prior committed configuration is used again after reboot. Safe reboot drains
-the storage worker before its acknowledgement is transmitted, drains USB TX,
-and then restarts into the normal runtime.
+Recovery exposes only redacted status and permits rollback of an uncommitted candidate or a safe reboot. The active stateless image does not offer SD operations, backlog synchronization, sensor-side History deletion, or a configuration factory-reset action in the repair tool. Its safe-reboot barrier has no telemetry writer to drain; it clears candidate state, completes the USB response, drains USB TX, and then reboots.
 
-For a surfaced Windows semaphore/write failure or final request timeout, close
-other serial monitors, keep USB connected, press and release RESET once, and
-capture the boot log from reset through the timeout if the problem repeats.
-Preserve the existing configuration and device identity. Run the status-only
-command above only after firmware resumes servicing USB provisioning.
+Normal meter, measurement, command, network, and OTA tasks do not start in the isolated maintenance boot. Candidate rollback never erases the committed slot, immutable identity, enrollment credentials, or OTA checkpoint.
 
-If provisioning reports an unconfirmed `commit_config` response, configuration
-may already be committed. Do not roll back, reuse the enrollment token, or
-repeat provisioning. After the device responds, run `Status`: when
-`provisioned=true`, run `SafeReboot`; when `provisioned=false`, obtain a new
-enrollment token and reprovision. If provisioning instead confirms that
-configuration is committed but safe reboot was not performed or confirmed,
-run only `SafeReboot` after the device responds.
-
-A configuration factory reset additionally requires the physical input, a 60-second device-generated token, `-WhatIf`/ShouldProcess confirmation, and typed text `RESET <device-fingerprint>`. It is distinct from server reading deletion, SD format, log clearing, or server unclaim. It does not silently reset lifetime sequence identity.
+For a Windows semaphore/write failure or request timeout, close other serial monitors, keep USB connected, press and release RESET once, and capture the boot log if it repeats. If `commit_config` may have succeeded before the response was lost, do not reuse the enrollment token. Wait for the device, run `Status`, and use `SafeReboot` when `provisioned=true`; obtain a new token only when the device confirms it remains unprovisioned.

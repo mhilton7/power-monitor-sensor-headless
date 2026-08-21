@@ -29,6 +29,45 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def esp32s3_app_identity(path: Path) -> tuple[str, str, str]:
+    """Read the immutable ESP-IDF app descriptor from an ESP32-S3 OTA image."""
+
+    image = path.read_bytes()
+    descriptor_offset = 24 + 8
+    descriptor_size = 256
+    if (
+        len(image) < descriptor_offset + descriptor_size
+        or image[0] != 0xE9
+        or not 1 <= image[1] <= 16
+        or int.from_bytes(image[12:14], "little") != 9
+        or int.from_bytes(image[descriptor_offset : descriptor_offset + 4], "little")
+        != 0xABCD5432
+    ):
+        raise RuntimeError("compiled firmware is not a valid ESP32-S3 application image")
+    first_segment_size = int.from_bytes(image[28:32], "little")
+    if (
+        first_segment_size < descriptor_size
+        or descriptor_offset + first_segment_size > len(image)
+    ):
+        raise RuntimeError("compiled firmware application descriptor is truncated")
+    descriptor = image[descriptor_offset : descriptor_offset + descriptor_size]
+
+    def text(offset: int, label: str) -> str:
+        field = descriptor[offset : offset + 32]
+        terminator = field.find(b"\0")
+        if terminator <= 0 or any(field[terminator + 1 :]):
+            raise RuntimeError(f"compiled firmware {label} is not unambiguous NUL-padded text")
+        try:
+            return field[:terminator].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(f"compiled firmware {label} is not ASCII") from exc
+
+    build_id = descriptor[144:176]
+    if build_id in {b"\0" * 32, b"\xff" * 32}:
+        raise RuntimeError("compiled firmware ELF build identity is unavailable")
+    return text(16, "version"), text(48, "project name"), build_id.hex()
+
+
 def run(*args: str, cwd: Path | None = None) -> str:
     return subprocess.run(args, cwd=cwd, check=True, text=True, capture_output=True).stdout.strip()
 
@@ -56,9 +95,47 @@ def compatibility_record(version: str, server_tag: str, commit: str,
             'telemetry_protocol': TELEMETRY_PROTOCOL,
             'com_protocol': 'pm-com/1.0.0',
             'config_schema': 1,
-            'journal_format': 1,
         },
     }
+
+
+def verify_hardware_certification(root: Path, evidence_path: Path, commit: str,
+                                  firmware_sha256: str) -> tuple[dict, bool]:
+    document = json.loads(evidence_path.read_text(encoding='utf-8'))
+    schema_id = document.get('schema')
+    if schema_id == 'pm-hardware-certification-status/1.0.0':
+        if document.get('status') != 'pending' or document.get('production_gate') != 'closed':
+            raise RuntimeError('hardware certification status must remain pending with its production gate closed')
+        return document, False
+    if schema_id != 'pm-hardware-certification/2.0.0':
+        raise RuntimeError('unknown hardware certification document schema')
+
+    schema = json.loads(
+        (root / 'release' / 'hardware-certification.schema.json').read_text(encoding='utf-8')
+    )
+    jsonschema.Draft202012Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(document)
+    if document.get('result') != 'pass':
+        raise RuntimeError('hardware certification evidence result is not pass')
+
+    verifier = subprocess.run(
+        (
+            sys.executable,
+            str(root / 'test' / 'hardware' / 'verify_evidence.py'),
+            str(evidence_path),
+            '--firmware-commit', commit,
+            '--firmware-sha256', firmware_sha256,
+        ),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if verifier.returncode != 0:
+        detail = (verifier.stderr or verifier.stdout).strip()
+        raise RuntimeError(f'hardware certification evidence failed semantic verification: {detail}')
+    return document, True
 
 
 def copy_required(source: Path, destination: Path) -> None:
@@ -146,7 +223,7 @@ def main() -> int:
     parser.add_argument('--download-base', required=True)
     parser.add_argument('--hardware-status', type=Path, required=True)
     parser.add_argument('--configuration', choices=('release-candidate', 'release'), default='release-candidate')
-    parser.add_argument('--server-tag', default='v0.1.0-rc.21')
+    parser.add_argument('--server-tag', default='v0.1.0-rc.22')
     parser.add_argument('--dependency-audit-report', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -169,8 +246,16 @@ def main() -> int:
         raise RuntimeError('compiled project identity or target does not match the release contract')
     if project_description.get('project_version') != args.version:
         raise RuntimeError('release version does not match compiled ESP-IDF application version')
-    hardware_document = json.loads(args.hardware_status.read_text(encoding='utf-8'))
-    hardware_certified = hardware_document.get('schema') == 'pm-hardware-certification/1.0.0'
+    compiled_firmware = build / f'{PROJECT}.bin'
+    compiled_elf = build / f'{PROJECT}.elf'
+    app_version, app_project, firmware_build_id = esp32s3_app_identity(compiled_firmware)
+    if app_version != args.version or app_project != PROJECT:
+        raise RuntimeError('embedded ESP application identity does not match the release contract')
+    if firmware_build_id != sha256(compiled_elf):
+        raise RuntimeError('embedded ESP application build ID does not match firmware.elf')
+    hardware_document, hardware_certified = verify_hardware_certification(
+        root, args.hardware_status.resolve(), commit, sha256(compiled_firmware)
+    )
     if args.configuration == 'release' and not hardware_certified:
         raise RuntimeError('stable release configuration requires certified marked-unit evidence')
 
@@ -202,10 +287,11 @@ def main() -> int:
 
     firmware = output / 'firmware.bin'
     manifest = {
-        'schema': 'pm-firmware-release/1.0.0', 'version': args.version, 'build_number': args.build_number,
+        'schema': 'pm-firmware-release/1.1.0', 'version': args.version, 'build_number': args.build_number,
         'project_name': PROJECT, 'target_chip': 'esp32s3', 'board_profile': BOARD,
         'minimum_boot_version': 1, 'minimum_config_version': 1, 'minimum_protocol': PROTOCOL,
         'image_size': firmware.stat().st_size, 'image_sha256': sha256(firmware),
+        'firmware_build_id': firmware_build_id,
         'download_url': f"{args.download_base.rstrip('/')}/firmware.bin",
         'ota_authentication': {
             'mode': 'per-device-hmac-sha256',
@@ -272,8 +358,8 @@ def main() -> int:
     })
     write_json(output / 'stack-report.json', {
         'schema':'pm-stack-report/1.0.0','generated_at':generated,
-        'configured_bytes':{'main_boot':8192,'measurement':4096,'interval':4096,'storage':6144,
-                            'network':16384,'control':8192,'supervisor':4096,
+        'configured_bytes':{'main_boot':8192,'measurement':4096,
+                            'network':16384,'control':6144,'supervisor':4096,
                             'usb_recovery':16384,'ota_ephemeral':16384},
         'hardware_high_water_marks':'pending_physical_hardware'
     })
@@ -282,7 +368,7 @@ def main() -> int:
     write_json(output / 'test-report.json', {'schema':'pm-test-report/1.0.0','generated_at':generated,
                                               'host':test_result,
                                               'hardware':'certified' if hardware_certified else 'pending'})
-    hardware_name = ('hardware-certification.json' if hardware_document.get('schema') == 'pm-hardware-certification/1.0.0'
+    hardware_name = ('hardware-certification.json' if hardware_certified
                      else 'hardware-certification-status.json')
     shutil.copy2(args.hardware_status, output / hardware_name)
     for source, name in ((root/'release'/'RELEASE_NOTES.md','RELEASE_NOTES.md'),(root/'release'/'MIGRATION.md','MIGRATION.md'),

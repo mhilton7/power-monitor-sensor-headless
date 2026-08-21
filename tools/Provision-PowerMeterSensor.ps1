@@ -45,7 +45,7 @@ $wifiPlain = $null
 $tokenPlain = $null
 try {
     $hello = Invoke-PowerMeterRequest -Serial $serial -Operation 'hello'
-    Write-Host "Device $($hello.device_fingerprint), firmware $($hello.firmware), sequence floor $($hello.sequence_floor) on $selectedPort"
+    Write-Host "Device $($hello.device_fingerprint), firmware $($hello.firmware) on $selectedPort"
     $wifiPlain = ConvertFrom-SecureValue $WifiPassword
     $tokenPlain = ConvertFrom-SecureValue $EnrollmentToken
     $config = [ordered]@{

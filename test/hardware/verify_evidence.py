@@ -13,11 +13,14 @@ from pathlib import Path
 import jsonschema
 
 REPOSITORY = 'https://github.com/mhilton7/power-monitor-sensor-headless'
-TESTS = ('pzem_authenticated_samples','crc_rejection','wrong_slave_rejection','sd_recovery',
-         'sequence_monotonic','ack_replay','https_chain','https_hostname','hmac_replay',
-         'ota_success','ota_rollback','com_recovery','watchdog_recovery')
+TESTS = ('pzem_authenticated_samples','crc_rejection','wrong_slave_rejection',
+         'no_sd_runtime_access','no_telemetry_nvs_writes','independent_sample_acceptance',
+         'later_sample_after_gap','latest_value_after_outage','wifi_recovery','server_recovery',
+         'identity_preserved','configuration_preserved','https_chain','https_hostname',
+         'hmac_replay','ota_success','ota_rollback','ota_identity_confirmed','com_recovery',
+         'watchdog_recovery')
 MARKINGS = ('unit_id','esp32s3_marking','pzem_model_marking','pzem_revision_marking',
-            'pzem_terminal_labels','ct_marking','sd_module_marking')
+            'pzem_terminal_labels','ct_marking')
 
 
 def digest(document: dict) -> str:
@@ -43,7 +46,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[2]
     schema = json.loads((root / 'release' / 'hardware-certification.schema.json').read_text(encoding='utf-8'))
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(document)
-    require(document.get('schema') == 'pm-hardware-certification/1.0.0', 'wrong certification schema')
+    require(document.get('schema') == 'pm-hardware-certification/2.0.0', 'wrong certification schema')
     require(document.get('result') == 'pass', 'certification result is not pass')
     firmware = document.get('firmware', {})
     require(firmware.get('repository') == REPOSITORY, 'wrong firmware repository')
@@ -51,6 +54,8 @@ def main() -> int:
     require(firmware.get('esp_idf_version') == 'v6.0.2' and firmware.get('target') == 'esp32s3', 'wrong toolchain or target')
     require(firmware.get('board_profile') == 'esp32-s3-devkitc-n16r8-reference/1', 'wrong board profile')
     require(firmware.get('protocol') == 'pm-protocol/1.0.0', 'wrong protocol')
+    require(firmware.get('telemetry_protocol') == 'pm-telemetry/2.0.0',
+            'wrong telemetry protocol')
     require(bool(re.fullmatch(r'[0-9a-f]{64}', firmware.get('image_sha256',''))), 'invalid firmware SHA-256')
     if args.firmware_sha256:
         require(firmware['image_sha256'] == args.firmware_sha256, 'firmware image hash does not match release')
@@ -63,7 +68,10 @@ def main() -> int:
     require(all(type(document.get('tests',{}).get(name)) is bool and document['tests'][name] for name in TESTS), 'one or more HIL tests did not pass')
     soak = document.get('soak', {})
     require(soak.get('pass') is True and soak.get('duration_hours',0) >= 72, '72-hour soak did not pass')
-    require(soak.get('unexplained_reboots') == 0 and soak.get('sequence_regressions') == 0, 'soak integrity failure')
+    require(soak.get('unexplained_reboots') == 0 and soak.get('identity_changes') == 0 and
+            soak.get('configuration_losses') == 0 and
+            1 <= soak.get('maximum_resident_telemetry_samples', 3) <= 2,
+            'stateless soak integrity failure')
     require(type(soak.get('samples_attempted')) is int and type(soak.get('samples_authenticated')) is int and 0 < soak['samples_authenticated'] <= soak['samples_attempted'], 'invalid soak sample counts')
     started = dt.datetime.fromisoformat(soak['started_at'].replace('Z','+00:00'))
     ended = dt.datetime.fromisoformat(soak['ended_at'].replace('Z','+00:00'))

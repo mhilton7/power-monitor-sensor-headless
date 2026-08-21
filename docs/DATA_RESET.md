@@ -1,6 +1,6 @@
 # Server data reset after stateless cutover
 
-RC17 has no sensor-side History store and accepts no Format SD, Sync Backlog, Repair Storage, Verify Storage, or data-reset command. The sensor cannot delete server History and never mounts or formats an inserted microSD card.
+The active stateless image has no sensor-side History store and accepts no Format SD, Sync Backlog, Repair Storage, Verify Storage, or data-reset command. The sensor cannot delete server History and never mounts or formats an inserted microSD card.
 
 Any authorized deletion of accepted History is a server-only operation scoped by the central application's permissions, home, sensor or service branch, and audit policy. It must not be represented as a sensor command, and it must not alter immutable sensor identity, enrollment credentials, Wi-Fi/static-IP/DNS settings, server origin or CA, PZEM configuration, provisioning state, or OTA recovery metadata.
 
