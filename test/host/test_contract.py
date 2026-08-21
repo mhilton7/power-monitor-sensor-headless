@@ -193,12 +193,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc22_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
-        expected_version = "0.1.0-rc.22"
-        expected_build_number = 25
-        expected_tag = "v0.1.0-rc.22"
+    def test_rc23_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.23"
+        expected_build_number = 26
+        expected_tag = "v0.1.0-rc.23"
         expected_openapi_sha256 = (
-            "f15e5429ca0333dbf5f1defeef01197d8a21d2bc9e684c78463f44e279b03123"
+            "3815180f5de88ed073a83f17ae13cffcf6a233e2daebf6b6ac56d1dc892dac72"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -219,6 +219,11 @@ class ServerContractTests(unittest.TestCase):
         release_notes = (ROOT / "release" / "RELEASE_NOTES.md").read_text(
             encoding="utf-8"
         )
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        build_guide = (ROOT / "docs" / "BUILD_AND_FLASH.md").read_text(encoding="utf-8")
+        release_process = (ROOT / "docs" / "RELEASE_PROCESS.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn(f'--server-tag "{expected_tag}"', workflow)
         self.assertIn(f'--build-number "{expected_build_number}"', workflow)
         self.assertNotIn('--build-number "$GITHUB_RUN_NUMBER"', workflow)
@@ -230,8 +235,23 @@ class ServerContractTests(unittest.TestCase):
         self.assertIn("Public RC15 and RC16 remain immutable and installable.", release_notes)
         self.assertIn("RC17 remains immutable failed-candidate evidence", release_notes)
         self.assertIn("RC18 through RC21 remain immutable", release_notes)
+        self.assertIn("Firmware RC22 remains immutable public evidence", release_notes)
+        self.assertIn(
+            "Runtime sources, partition layout, sdkconfig profiles, and dependency locks "
+            "remain byte-identical",
+            release_notes,
+        )
         self.assertIn("pm-telemetry/2.0.0", release_notes)
         self.assertIn("does not complete the server-side OTA deployment", release_notes)
+        self.assertIn(f"`{expected_version}` build {expected_build_number}", readme)
+        self.assertIn(
+            f"-Version {expected_version} -BuildNumber {expected_build_number}",
+            build_guide,
+        )
+        self.assertIn(f"`codex/release-{expected_version}`", release_process)
+        self.assertIn(f"tag `v{expected_version}`", release_process)
+        self.assertNotIn("-Version 0.1.0-rc.22 -BuildNumber 25", build_guide)
+        self.assertNotIn("-Version 0.1.0-rc.22 -BuildNumber 25", release_process)
 
     def test_release_compatibility_declares_stateless_telemetry_protocol(self) -> None:
         path = ROOT / "tools" / "build_release.py"
@@ -241,7 +261,7 @@ class ServerContractTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         record = module.compatibility_record(
-            "0.1.0-rc.22", "v0.1.0-rc.22", "a" * 40, "b" * 64
+            "0.1.0-rc.23", "v0.1.0-rc.23", "a" * 40, "b" * 64
         )
         self.assertEqual("pm-protocol/1.0.0", record["contracts"]["device_protocol"])
         self.assertEqual(

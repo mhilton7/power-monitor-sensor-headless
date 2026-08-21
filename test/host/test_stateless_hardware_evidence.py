@@ -42,7 +42,7 @@ class StatelessHardwareEvidenceTests(unittest.TestCase):
                 "repository": "https://github.com/mhilton7/power-monitor-sensor-headless",
                 "commit": "a" * 40,
                 "image_sha256": "b" * 64,
-                "version": "0.1.0-rc.22",
+                "version": "0.1.0-rc.23",
                 "esp_idf_version": "v6.0.2",
                 "target": "esp32s3",
                 "board_profile": "esp32-s3-devkitc-n16r8-reference/1",

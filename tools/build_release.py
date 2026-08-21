@@ -223,7 +223,7 @@ def main() -> int:
     parser.add_argument('--download-base', required=True)
     parser.add_argument('--hardware-status', type=Path, required=True)
     parser.add_argument('--configuration', choices=('release-candidate', 'release'), default='release-candidate')
-    parser.add_argument('--server-tag', default='v0.1.0-rc.22')
+    parser.add_argument('--server-tag', default='v0.1.0-rc.23')
     parser.add_argument('--dependency-audit-report', type=Path, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
