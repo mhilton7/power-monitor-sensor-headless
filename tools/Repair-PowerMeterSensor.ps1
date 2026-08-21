@@ -1,8 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Port,
-    [ValidateSet('Status','RollbackConfiguration','SafeReboot','FactoryReset')][string]$Action = 'Status',
-    [string]$TypedConfirmation
+    [ValidateSet('Status','RollbackConfiguration','SafeReboot')][string]$Action = 'Status'
 )
 
 Set-StrictMode -Version Latest
@@ -12,7 +11,7 @@ $selectedPort = Select-PowerMeterPort -Port $Port
 $serial = Open-PowerMeterPort -PortName $selectedPort
 try {
     $status = Invoke-PowerMeterRequest -Serial $serial -Operation 'status'
-    Write-Host "Device $($status.device_fingerprint), firmware $($status.firmware), provisioned=$($status.provisioned), physical-recovery=$($status.physical_recovery), sequence-floor=$($status.sequence_floor)"
+    Write-Host "Device $($status.device_fingerprint), firmware $($status.firmware), provisioned=$($status.provisioned), physical-recovery=$($status.physical_recovery)"
     switch ($Action) {
         'Status' { }
         'RollbackConfiguration' {
@@ -22,21 +21,8 @@ try {
             }
         }
         'SafeReboot' {
-            if ($PSCmdlet.ShouldProcess($status.device_fingerprint, 'Request storage-checkpointed safe reboot')) {
+            if ($PSCmdlet.ShouldProcess($status.device_fingerprint, 'Request configuration-checkpointed safe reboot')) {
                 [void](Invoke-PowerMeterRequest -Serial $serial -Operation 'safe_reboot')
-            }
-        }
-        'FactoryReset' {
-            if (-not $status.physical_recovery) { throw 'Factory reset requires the physical recovery input at boot.' }
-            $prepared = Invoke-PowerMeterRequest -Serial $serial -Operation 'factory_reset_prepare'
-            Write-Warning $prepared.warning
-            if ($TypedConfirmation -ne "RESET $($status.device_fingerprint)") {
-                throw "Re-run with -TypedConfirmation 'RESET $($status.device_fingerprint)' within a physical recovery session."
-            }
-            if ($PSCmdlet.ShouldProcess($status.device_fingerprint, 'Factory-reset configuration; preserve device/sequence identity')) {
-                [void](Invoke-PowerMeterRequest -Serial $serial -Operation 'factory_reset_commit' -Fields @{
-                    confirmation_token = $prepared.confirmation_token
-                })
             }
         }
     }

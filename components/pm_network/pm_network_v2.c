@@ -794,6 +794,10 @@ static esp_err_t send_current_telemetry(pm_network_context_t *context,
                                             telemetry_seconds);
     }
     if (error == ESP_OK) {
+        /* A signed 2xx means the server committed this request atomically,
+         * including its command_results.  A lost response leaves the results
+         * in the ledger for an idempotent resend; only this validated success
+         * acknowledges the exact results serialized above. */
         notify_result_acceptance(context, io->body);
         parse_commands(context, io->response);
     }

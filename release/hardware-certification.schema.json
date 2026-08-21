@@ -1,18 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://power-meter.invalid/schemas/pm-hardware-certification-1.0.0.json",
-  "title": "PowerMeter V2 marked-unit hardware certification",
+  "$id": "https://power-meter.invalid/schemas/pm-hardware-certification-2.0.0.json",
+  "title": "PowerMeter V2 stateless marked-unit hardware certification",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "evidence_id", "generated_at", "result", "firmware", "marked_unit", "electrical", "tests", "soak", "signoff"],
   "properties": {
-    "schema": {"const": "pm-hardware-certification/1.0.0"},
+    "schema": {"const": "pm-hardware-certification/2.0.0"},
     "evidence_id": {"type": "string", "format": "uuid"},
     "generated_at": {"type": "string", "format": "date-time"},
     "result": {"enum": ["pass", "fail"]},
     "firmware": {
-      "type": "object", "additionalProperties": false,
-      "required": ["repository", "commit", "image_sha256", "version", "esp_idf_version", "target", "board_profile", "protocol"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "image_sha256", "version", "esp_idf_version", "target", "board_profile", "protocol", "telemetry_protocol"],
       "properties": {
         "repository": {"const": "https://github.com/mhilton7/power-monitor-sensor-headless"},
         "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -21,12 +22,14 @@
         "esp_idf_version": {"const": "v6.0.2"},
         "target": {"const": "esp32s3"},
         "board_profile": {"const": "esp32-s3-devkitc-n16r8-reference/1"},
-        "protocol": {"const": "pm-protocol/1.0.0"}
+        "protocol": {"const": "pm-protocol/1.0.0"},
+        "telemetry_protocol": {"const": "pm-telemetry/2.0.0"}
       }
     },
     "marked_unit": {
-      "type": "object", "additionalProperties": false,
-      "required": ["unit_id", "esp32s3_marking", "pzem_model_marking", "pzem_revision_marking", "pzem_terminal_labels", "ct_marking", "sd_module_marking", "photo_sha256"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit_id", "esp32s3_marking", "pzem_model_marking", "pzem_revision_marking", "pzem_terminal_labels", "ct_marking", "photo_sha256"],
       "properties": {
         "unit_id": {"type": "string", "minLength": 1},
         "esp32s3_marking": {"type": "string", "minLength": 1},
@@ -34,12 +37,12 @@
         "pzem_revision_marking": {"type": "string", "minLength": 1},
         "pzem_terminal_labels": {"type": "string", "minLength": 1},
         "ct_marking": {"type": "string", "minLength": 1},
-        "sd_module_marking": {"type": "string", "minLength": 1},
         "photo_sha256": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
       }
     },
     "electrical": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["qualified_person", "isolated_test_fixture", "ttl_idle_voltage_v", "logic_high_voltage_v", "logic_low_voltage_v", "uart_baud", "data_bits", "parity", "stop_bits", "register_map_variant"],
       "properties": {
         "qualified_person": {"type": "string", "minLength": 1},
@@ -47,42 +50,80 @@
         "ttl_idle_voltage_v": {"type": "number", "minimum": 0, "maximum": 5.5},
         "logic_high_voltage_v": {"type": "number", "minimum": 0, "maximum": 5.5},
         "logic_low_voltage_v": {"type": "number", "minimum": 0, "maximum": 1},
-        "uart_baud": {"const": 9600}, "data_bits": {"const": 8}, "parity": {"const": "none"}, "stop_bits": {"const": 1},
+        "uart_baud": {"const": 9600},
+        "data_bits": {"const": 8},
+        "parity": {"const": "none"},
+        "stop_bits": {"const": 1},
         "register_map_variant": {"type": "string", "minLength": 1}
       }
     },
     "tests": {
-      "type": "object", "additionalProperties": false,
-      "required": ["pzem_authenticated_samples", "crc_rejection", "wrong_slave_rejection", "sd_recovery", "sequence_monotonic", "ack_replay", "https_chain", "https_hostname", "hmac_replay", "ota_success", "ota_rollback", "com_recovery", "watchdog_recovery"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pzem_authenticated_samples", "crc_rejection", "wrong_slave_rejection",
+        "no_sd_runtime_access", "no_telemetry_nvs_writes",
+        "independent_sample_acceptance", "later_sample_after_gap", "latest_value_after_outage",
+        "wifi_recovery", "server_recovery", "identity_preserved", "configuration_preserved",
+        "https_chain", "https_hostname", "hmac_replay", "ota_success", "ota_rollback",
+        "ota_identity_confirmed", "com_recovery", "watchdog_recovery"
+      ],
       "properties": {
-        "pzem_authenticated_samples": {"type": "boolean"}, "crc_rejection": {"type": "boolean"},
-        "wrong_slave_rejection": {"type": "boolean"}, "sd_recovery": {"type": "boolean"},
-        "sequence_monotonic": {"type": "boolean"}, "ack_replay": {"type": "boolean"},
-        "https_chain": {"type": "boolean"}, "https_hostname": {"type": "boolean"},
-        "hmac_replay": {"type": "boolean"}, "ota_success": {"type": "boolean"},
-        "ota_rollback": {"type": "boolean"}, "com_recovery": {"type": "boolean"},
+        "pzem_authenticated_samples": {"type": "boolean"},
+        "crc_rejection": {"type": "boolean"},
+        "wrong_slave_rejection": {"type": "boolean"},
+        "no_sd_runtime_access": {"type": "boolean"},
+        "no_telemetry_nvs_writes": {"type": "boolean"},
+        "independent_sample_acceptance": {"type": "boolean"},
+        "later_sample_after_gap": {"type": "boolean"},
+        "latest_value_after_outage": {"type": "boolean"},
+        "wifi_recovery": {"type": "boolean"},
+        "server_recovery": {"type": "boolean"},
+        "identity_preserved": {"type": "boolean"},
+        "configuration_preserved": {"type": "boolean"},
+        "https_chain": {"type": "boolean"},
+        "https_hostname": {"type": "boolean"},
+        "hmac_replay": {"type": "boolean"},
+        "ota_success": {"type": "boolean"},
+        "ota_rollback": {"type": "boolean"},
+        "ota_identity_confirmed": {"type": "boolean"},
+        "com_recovery": {"type": "boolean"},
         "watchdog_recovery": {"type": "boolean"}
       }
     },
     "soak": {
-      "type": "object", "additionalProperties": false,
-      "required": ["started_at", "ended_at", "duration_hours", "samples_attempted", "samples_authenticated", "reboots", "unexplained_reboots", "data_gaps", "sequence_regressions", "pass"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at", "ended_at", "duration_hours", "samples_attempted",
+        "samples_authenticated", "reboots", "unexplained_reboots", "data_gaps",
+        "maximum_resident_telemetry_samples", "identity_changes", "configuration_losses", "pass"
+      ],
       "properties": {
-        "started_at": {"type": "string", "format": "date-time"}, "ended_at": {"type": "string", "format": "date-time"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "ended_at": {"type": "string", "format": "date-time"},
         "duration_hours": {"type": "number", "minimum": 72},
-        "samples_attempted": {"type": "integer", "minimum": 1}, "samples_authenticated": {"type": "integer", "minimum": 1},
-        "reboots": {"type": "integer", "minimum": 0}, "unexplained_reboots": {"type": "integer", "minimum": 0},
-        "data_gaps": {"type": "integer", "minimum": 0}, "sequence_regressions": {"type": "integer", "minimum": 0},
+        "samples_attempted": {"type": "integer", "minimum": 1},
+        "samples_authenticated": {"type": "integer", "minimum": 1},
+        "reboots": {"type": "integer", "minimum": 0},
+        "unexplained_reboots": {"type": "integer", "minimum": 0},
+        "data_gaps": {"type": "integer", "minimum": 0},
+        "maximum_resident_telemetry_samples": {"type": "integer", "minimum": 1, "maximum": 2},
+        "identity_changes": {"type": "integer", "minimum": 0},
+        "configuration_losses": {"type": "integer", "minimum": 0},
         "pass": {"type": "boolean"}
       }
     },
     "signoff": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["operator", "reviewer", "record_sha256"],
       "properties": {
-        "operator": {"type": "string", "minLength": 1}, "reviewer": {"type": "string", "minLength": 1},
+        "operator": {"type": "string", "minLength": 1},
+        "reviewer": {"type": "string", "minLength": 1},
         "record_sha256": {
-          "type": "string", "pattern": "^[0-9a-f]{64}$",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
           "$comment": "SHA-256 of UTF-8 JSON after omitting only signoff.record_sha256, recursive key sorting, separators (comma,colon), ensure_ascii=false, allow_nan=false, and no trailing newline."
         }
       }

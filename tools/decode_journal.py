@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode and CRC-validate PowerMeter V2 microSD journal segments."""
+"""Read-only decoder for retired, unbuilt PowerMeter V2 journal evidence."""
 from __future__ import annotations
 
 import argparse

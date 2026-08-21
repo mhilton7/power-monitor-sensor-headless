@@ -1,20 +1,13 @@
 # Hardware certification
 
-Status: **pending**. `release/hardware-certification-status.json` is the machine-readable RC status. It is not pass evidence and cannot promote a stable tag.
+Status: **pending**. `release/hardware-certification-status.json` is machine-readable status only and cannot promote a stable image.
 
-The physical suite covers marked-unit PZEM frames and CRC/wrong-slave rejection; SD write/recovery; sequence/ack replay; valid and invalid TLS; HMAC replay; AP/server/DNS outages; physical power cycling; USB recovery; OTA success and forced rollback; watchdog recovery; and a continuous minimum 72-hour soak. It records attempted/authenticated samples, explained/unexplained reboots, gaps, and sequence regressions.
+The stateless physical suite uses `pm-hardware-certification/2.0.0`. It binds the exact repository commit and firmware SHA-256, pinned ESP-IDF v6.0.2, ESP32-S3 target, board profile, `pm-protocol/1.0.0`, and `pm-telemetry/2.0.0`. It records exact ESP32-S3, PZEM, CT, connector, and revision markings; hashed photographs; isolated UART electrical measurements; and independent operator/reviewer signoff.
 
-The operator builds the certification candidate from `sdkconfig.defaults;sdkconfig.release` with the intended stable SemVer, provisions the required NVS-encryption HMAC key on the marked unit, and flashes that exact reproducible binary before running HIL. Setting the compile-time hardware flag merely permits the candidate driver to participate in this test; it is not certification evidence and cannot publish a stable release. The resulting evidence records that binary's SHA-256, and stable automation must reproduce the same image byte-for-byte before promotion.
+Required marked-unit cases cover authenticated PZEM readings and CRC/wrong-slave rejection; proof of no SD runtime access and no telemetry NVS writes; independent acceptance of a later sample after a gap; newest-value recovery; Wi-Fi/server recovery; identity and configuration preservation; TLS chain/hostname and HMAC replay rejection; secure OTA success, rollback, and same-identity version confirmation; COM recovery; and watchdog recovery. Stress cases cover AP reboot, server restart, DNS outage, physical power cycle, and repeated-outage memory stability.
 
-Passing evidence uses `pm-hardware-certification/1.0.0`, validates against `release/hardware-certification.schema.json`, names the exact Git repository/commit/image SHA, includes hashed physical photos/markings and measured UART electrical behavior, and has different, independent operator/reviewer signoffs. `signoff.record_sha256` is SHA-256 of UTF-8 JSON after removing only that field, recursively sorting keys, using separators `(',', ':')`, `ensure_ascii=false`, `allow_nan=false`, preserving array order, and adding no newline.
+The 72-hour soak must report positive authenticated samples, zero unexplained reboots, zero identity changes, zero configuration losses, and no more than two resident telemetry samples. Connection gaps may exist and must remain visible; they are not treated as a failed backlog.
 
-Certification is detached so it never has to contain the hash of the commit that adds itself. For source commit `<commit>`, the operator creates a signed annotated tag `hardware-certification-<commit>` pointing to that exact commit. Its annotation contains exactly `hardware-certification-sha256: <sha256>` for the canonical evidence file, and the GitHub Release for that tag carries `hardware-certification.json`. Stable automation verifies the tag's cryptographic signature through GitHub, the signed annotation-to-asset digest, the JSON Schema and semantic rules, the source commit, and the rebuilt production image SHA. The evidence file is never committed to the source tree.
+Setting the compile-time hardware flag only permits the candidate driver to participate. It is not certification. The evidence must validate against `release/hardware-certification.schema.json`, match the exact image reproduced by release automation, and pass `test/hardware/verify_evidence.py`. A seller page, PDF, simulation, manually edited status, or another physical unit is insufficient.
 
-Stable semantic gate:
-
-```powershell
-python .\test\hardware\verify_evidence.py C:\Secure\hardware-certification.json `
-  --firmware-commit (git rev-parse HEAD) --firmware-sha256 (Get-FileHash .\firmware.bin -Algorithm SHA256).Hash.ToLowerInvariant()
-```
-
-Every test boolean must be true; authenticated samples must be positive and no greater than attempts; duration and timestamps must cover at least 72 hours; unexplained reboots and sequence regressions must be zero. Simulation, seller text, another unit, or manually edited status cannot substitute.
+Certification remains detached: a signed annotated tag `hardware-certification-<commit>` points to the exact source commit and its annotation binds the canonical evidence SHA-256. No secret fixture token or certification evidence containing installation details is committed to this repository.

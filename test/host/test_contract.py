@@ -193,12 +193,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc21_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
-        expected_version = "0.1.0-rc.21"
-        expected_build_number = 24
-        expected_tag = "v0.1.0-rc.21"
+    def test_rc22_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.22"
+        expected_build_number = 25
+        expected_tag = "v0.1.0-rc.22"
         expected_openapi_sha256 = (
-            "6d276b738467c867d062ab78b6cdc76d246f15d5aca7e2c505cddabf9b6f2c24"
+            "f15e5429ca0333dbf5f1defeef01197d8a21d2bc9e684c78463f44e279b03123"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -220,6 +220,8 @@ class ServerContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(f'--server-tag "{expected_tag}"', workflow)
+        self.assertIn(f'--build-number "{expected_build_number}"', workflow)
+        self.assertNotIn('--build-number "$GITHUB_RUN_NUMBER"', workflow)
         self.assertIn(f"default='{expected_tag}'", release_builder)
         self.assertIn(f'set(PM_FIRMWARE_VERSION "{expected_version}"', cmake)
         self.assertIn(f"[string]$Version = '{expected_version}'", powershell_builder)
@@ -227,7 +229,7 @@ class ServerContractTests(unittest.TestCase):
         self.assertIn(f"# PowerMeter Sensor Headless {expected_version}", release_notes)
         self.assertIn("Public RC15 and RC16 remain immutable and installable.", release_notes)
         self.assertIn("RC17 remains immutable failed-candidate evidence", release_notes)
-        self.assertIn("RC18 through RC20 remain immutable", release_notes)
+        self.assertIn("RC18 through RC21 remain immutable", release_notes)
         self.assertIn("pm-telemetry/2.0.0", release_notes)
         self.assertIn("does not complete the server-side OTA deployment", release_notes)
 
@@ -239,12 +241,17 @@ class ServerContractTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         record = module.compatibility_record(
-            "0.1.0-rc.21", "v0.1.0-rc.21", "a" * 40, "b" * 64
+            "0.1.0-rc.22", "v0.1.0-rc.22", "a" * 40, "b" * 64
         )
         self.assertEqual("pm-protocol/1.0.0", record["contracts"]["device_protocol"])
         self.assertEqual(
             "pm-telemetry/2.0.0", record["contracts"]["telemetry_protocol"]
         )
+        self.assertNotIn("journal_format", record["contracts"])
+        source = path.read_text(encoding="utf-8")
+        self.assertNotIn("'interval':4096", source)
+        self.assertNotIn("'storage':6144", source)
+        self.assertIn("'control':6144", source)
 
     def test_credential_rotation_payloads_results_and_key_cutover_are_exact(self) -> None:
         vectors = self.validate(
@@ -377,6 +384,22 @@ class ServerContractTests(unittest.TestCase):
         for path in sorted(VECTORS.glob("device-*.json")):
             text = path.read_text(encoding="utf-8").rstrip("\n")
             self.assertEqual(text, json.dumps(json.loads(text), separators=(",", ":"), ensure_ascii=False), path.name)
+
+    def test_release_manifest_binds_the_exact_elf_build_identity(self) -> None:
+        schema = self.load(ROOT / "release", "manifest.schema.json")
+        self.assertEqual(
+            "pm-firmware-release/1.1.0",
+            schema["properties"]["schema"]["const"],
+        )
+        self.assertIn("firmware_build_id", schema["required"])
+        self.assertEqual(
+            "^[0-9a-f]{64}$",
+            schema["properties"]["firmware_build_id"]["pattern"],
+        )
+        builder = (ROOT / "tools" / "build_release.py").read_text(encoding="utf-8")
+        self.assertIn("app_version, app_project, firmware_build_id = esp32s3_app_identity", builder)
+        self.assertIn("firmware_build_id != sha256(compiled_elf)", builder)
+        self.assertIn("'firmware_build_id': firmware_build_id", builder)
 
 
 if __name__ == "__main__":
