@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$')][string]$Version = '0.1.0-rc.23',
-    [ValidateRange(1,2147483647)][int]$BuildNumber = 26,
-    [ValidatePattern('^https://')][string]$DownloadBase = 'https://power-monitor.home.arpa:8443/api/firmware/releases/0.1.0-rc.23',
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$')][string]$Version = '0.1.0-rc.24',
+    [ValidateRange(1,2147483647)][int]$BuildNumber = 27,
+    [ValidatePattern('^https://')][string]$DownloadBase = 'https://power-monitor.home.arpa:8443/api/firmware/releases/0.1.0-rc.24',
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '..\build-release'),
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\release\out\0.1.0-rc.23')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\release\out\0.1.0-rc.24')
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
