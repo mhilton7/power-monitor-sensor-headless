@@ -193,12 +193,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc27_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
-        expected_version = "0.1.0-rc.27"
-        expected_build_number = 30
-        expected_tag = "v0.1.0-rc.27"
+    def test_rc28_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.28"
+        expected_build_number = 31
+        expected_tag = "v0.1.0-rc.28"
         expected_openapi_sha256 = (
-            "b730b9e200124b2d45da9f59cedf5cf903e9fcca42b8586d6449c689908d7ff6"
+            "8f4f6d80f92fdc82b74757a372c9dea7bc1daeff02ed3e6edf93b9f8a68e0273"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -261,7 +261,7 @@ class ServerContractTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         record = module.compatibility_record(
-            "0.1.0-rc.27", "v0.1.0-rc.27", "a" * 40, "b" * 64
+            "0.1.0-rc.28", "v0.1.0-rc.28", "a" * 40, "b" * 64
         )
         self.assertEqual("pm-protocol/1.0.0", record["contracts"]["device_protocol"])
         self.assertEqual(
