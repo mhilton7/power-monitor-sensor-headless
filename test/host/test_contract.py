@@ -193,12 +193,12 @@ class ServerContractTests(unittest.TestCase):
             }:
                 self.assertEqual(candidate.read_bytes(), (CONTRACTS / name).read_bytes(), name)
 
-    def test_rc30_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
-        expected_version = "0.1.0-rc.30"
-        expected_build_number = 33
-        expected_tag = "v0.1.0-rc.30"
+    def test_rc31_metadata_binds_the_coordinated_stateless_server_release(self) -> None:
+        expected_version = "0.1.0-rc.31"
+        expected_build_number = 34
+        expected_tag = "v0.1.0-rc.31"
         expected_openapi_sha256 = (
-            "eddc0679e6778f07c0702f166ae5bf0f62017ce03e68c9dc3fc31e67f81d2d12"
+            "c7d2ef230f4e3f183251cd010731a122875cddf24cce829da69dfd8ffb0c3c74"
         )
         manifest = self.load(VECTORS, "server-contract.json")
         self.assertEqual(PROTOCOL, manifest["protocol_id"])
@@ -248,7 +248,7 @@ class ServerContractTests(unittest.TestCase):
             f"-Version {expected_version} -BuildNumber {expected_build_number}",
             build_guide,
         )
-        self.assertIn(f"`codex/release-{expected_version}`", release_process)
+        self.assertIn("`codex/rc31-live-pricing-compatibility`", release_process)
         self.assertIn(f"tag `v{expected_version}`", release_process)
         self.assertNotIn("-Version 0.1.0-rc.22 -BuildNumber 25", build_guide)
         self.assertNotIn("-Version 0.1.0-rc.22 -BuildNumber 25", release_process)
@@ -261,7 +261,7 @@ class ServerContractTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         record = module.compatibility_record(
-            "0.1.0-rc.30", "v0.1.0-rc.30", "a" * 40, "b" * 64
+            "0.1.0-rc.31", "v0.1.0-rc.31", "a" * 40, "b" * 64
         )
         self.assertEqual("pm-protocol/1.0.0", record["contracts"]["device_protocol"])
         self.assertEqual(
